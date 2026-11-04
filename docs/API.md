@@ -4,7 +4,7 @@ Generated from the `///` contracts in `src/`. Do not edit by hand.
 
 Pure Mettle: no C, no shared state. Every function is safe on any thread.
 
-Primitives: [core/status](#corestatus), [core/types](#coretypes), [core/util](#coreutil), [core/encode](#coreencode), [hash/hash](#hashhash), [mac/mac](#macmac), [mac/kdf](#mackdf), [password/pwhash](#passwordpwhash), [cipher/aead](#cipheraead), [cipher/gcm](#ciphergcm), [ecc/kx](#ecckx), [ecc/sign](#eccsign), [ecc/p256](#eccp256), [ecc/ecdsa](#eccecdsa), [rsa/rsa](#rsarsa).
+Primitives: [core/status](#corestatus), [core/types](#coretypes), [core/util](#coreutil), [core/encode](#coreencode), [hash/hash](#hashhash), [mac/mac](#macmac), [mac/kdf](#mackdf), [password/pwhash](#passwordpwhash), [cipher/aead](#cipheraead), [cipher/gcm](#ciphergcm), [ecc/kx](#ecckx), [ecc/sign](#eccsign), [ecc/p256](#eccp256), [ecc/p384](#eccp384), [ecc/ecdsa](#eccecdsa), [rsa/rsa](#rsarsa).
 Recipes: [recipes/signed](#recipessigned), [recipes/token](#recipestoken), [recipes/seal](#recipesseal), [recipes/totp](#recipestotp).
 
 ## core/status
@@ -2281,9 +2281,98 @@ Computes the raw ECDH shared secret of P-256: the X coordinate of the point sk *
 var z: CrKey32; if (cr_p256_ecdh(&z, &sk, &peer[0], 65) != CR_OK) { reject(); }
 ```
 
+## ecc/p384
+
+NIST P-384 (secp384r1) key pairs and ECDH, in pure Mettle, constant time in the secret scalar: the generic prime-curve code of BearSSL on 31-bit big integers, with Jacobian points in Montgomery form, the doubling and addition formulas written as straight sequences of modular operations, and a 2-bit window for point multiplication. Standards: FIPS 186-5 (the curve and key pairs), SEC 1 v2 (point encoding).
+
+### CR_P384_PUBLIC_BYTES
+
+```mettle
+export const CR_P384_PUBLIC_BYTES: int64 = 97;
+```
+
+Size in bytes of a P-384 public key: the uncompressed point 0x04 || X || Y.
+
+- **returns:** 97
+- **owns:** nothing
+- **thread:** constant
+
+```mettle
+var pk: uint8[97]; cr_p384_keypair(&pk[0], CR_P384_PUBLIC_BYTES, &sk);
+```
+
+### CrP384Secret
+
+```mettle
+export struct CrP384Secret {
+  b: uint8[48];
+}
+```
+
+A P-384 secret key, the scalar d as 48 big-endian bytes with 1 <= d <= n-1 (n is the group order).
+
+- **in:** - (zeroed when declared: `var x: CrP384Secret;`)
+- **owns:** secret: wipe with cr_wipe(&sk.b[0], 48) when done
+- **thread:** any thread (no shared state)
+
+```mettle
+var sk: CrP384Secret; cr_p384_keypair(&pk[0], 97, &sk);
+```
+
+### cr_p384_keypair
+
+```mettle
+export fn cr_p384_keypair(pk: uint8*, pk_cap: int64, sk: CrP384Secret*) -> int32
+```
+
+Generates a P-384 key pair: a uniformly random secret scalar in [1, n-1] (rejection sampling on 48 random bytes) and its public key, the uncompressed point 0x04 || X || Y.
+
+- **in:** pk, writable for pk_cap bytes, pk_cap >= 97 (CR_P384_PUBLIC_BYTES); sk
+- **returns:** CR_OK; CR_E_ARG (null pointer or negative pk_cap); CR_E_SPACE if pk_cap < 97 (nothing is written); CR_E_INTERNAL if the kernel random source fails (sk is wiped)
+- **owns:** sk is secret caller memory: cr_wipe(&sk.b[0], 48) when done; pk is public
+- **thread:** any thread (no shared state)
+
+```mettle
+var pk: uint8[97]; var sk: CrP384Secret; cr_p384_keypair(&pk[0], 97, &sk);
+```
+
+### cr_p384_public_from_secret
+
+```mettle
+export fn cr_p384_public_from_secret(pk: uint8*, pk_cap: int64, sk: CrP384Secret*) -> int32
+```
+
+Computes the public key of a P-384 secret scalar: the uncompressed point 0x04 || X || Y of d * G.
+
+- **in:** pk, writable for pk_cap bytes, pk_cap >= 97 (CR_P384_PUBLIC_BYTES); sk
+- **returns:** CR_OK; CR_E_ARG (null pointer or negative pk_cap); CR_E_SPACE if pk_cap < 97 (nothing is written); CR_E_KEY if the scalar is 0 or not lower than the group order n (the first 97 bytes of pk are wiped)
+- **owns:** nothing
+- **thread:** any thread (no shared state)
+
+```mettle
+if (cr_p384_public_from_secret(&pk[0], 97, &sk) != CR_OK) { reject(); }
+```
+
+### cr_p384_ecdh
+
+```mettle
+export fn cr_p384_ecdh(shared: uint8*, shared_cap: int64, sk: CrP384Secret*, peer: uint8*, peer_len: int64) -> int32
+```
+
+Computes the raw ECDH shared secret of P-384: the X coordinate of the point sk * peer, as 48 big-endian bytes. This is not a key: feed it into a KDF (cr_hkdf_sha384) with both public keys and a context string. The peer key is validated: it must be exactly 97 bytes, 0x04 || X || Y, with X and Y lower than the field prime and the point on the curve (the curve has prime order, so there are no small subgroups).
+
+- **in:** shared, writable for shared_cap bytes, shared_cap >= 48; sk, our secret key; peer, readable for peer_len bytes
+- **returns:** CR_OK; CR_E_ARG (null pointer, negative shared_cap or peer_len); CR_E_SPACE if shared_cap < 48 (nothing is written); CR_E_KEY if peer is not a valid public key (wrong length or format, coordinates out of range, not on the curve) or sk is 0 or not lower than n (the first 48 bytes of shared are wiped)
+- **owns:** shared is secret caller memory: cr_wipe(shared, 48) when done
+- **thread:** any thread (no shared state)
+
+```mettle
+var z: uint8[48]; if (cr_p384_ecdh(&z[0], 48, &sk, &peer[0], 97) != CR_OK) { reject(); }
+```
+
 ## ecc/ecdsa
 
-ECDSA on NIST P-256 (secp256r1), in pure Mettle: deterministic signatures (RFC 6979) with constant-time signing, and strict verification. Standards: FIPS 186-5 (ECDSA), SEC 1 v2, RFC 6979 (the nonce), RFC 3279 (the DER signature, SEQUENCE { INTEGER r, INTEGER s }).
+ECDSA on NIST P-256 (secp256r1) and P-384 (secp384r1), in pure Mettle: deterministic signatures (RFC 6979) with constant-time signing, and strict verification. Standards: FIPS 186-5 (ECDSA), SEC 1 v2, RFC 6979 (the nonce), RFC 3279 (the DER signature, SEQUENCE { INTEGER r, INTEGER s }).
 
 ### CR_P256_ECDSA_SIG_MAX
 
@@ -2299,6 +2388,22 @@ Largest DER signature cr_p256_ecdsa_sign can write: 72 bytes (a SEQUENCE of two 
 
 ```mettle
 var sig: uint8[72]; var sl: int64; cr_p256_ecdsa_sign(&sig[0], CR_P256_ECDSA_SIG_MAX, &sl, m, n, CR_HASH_SHA256, &sk);
+```
+
+### CR_P384_ECDSA_SIG_MAX
+
+```mettle
+export const CR_P384_ECDSA_SIG_MAX: int64 = 104;
+```
+
+Largest DER signature cr_p384_ecdsa_sign can write: 104 bytes (a SEQUENCE of two INTEGERs of up to 49 bytes each).
+
+- **returns:** 104
+- **owns:** nothing
+- **thread:** constant
+
+```mettle
+var sig: uint8[104]; var sl: int64; cr_p384_ecdsa_sign(&sig[0], CR_P384_ECDSA_SIG_MAX, &sl, m, n, CR_HASH_SHA384, &sk);
 ```
 
 ### cr_p256_ecdsa_sign
@@ -2335,9 +2440,43 @@ Verifies an ECDSA P-256 signature over a message. The message is hashed with the
 if (!cr_p256_ecdsa_verify(&sig[0], sl, m.chars, (int64)m.length, CR_HASH_SHA256, &pk[0], 65)) { reject(); }
 ```
 
+### cr_p384_ecdsa_sign
+
+```mettle
+export fn cr_p384_ecdsa_sign(sig: uint8*, sig_cap: int64, sig_len: int64*, msg: uint8*, n: int64, hash: int32, sk: CrP384Secret*) -> int32
+```
+
+Signs a message with ECDSA on P-384 and returns the signature in DER (SEQUENCE { INTEGER r, INTEGER s }, 8 to 104 bytes). The message is hashed with the chosen hash (CR_HASH_SHA256, CR_HASH_SHA384 or CR_HASH_SHA512); the nonce is deterministic (RFC 6979, HMAC_DRBG over the same hash), so a bad random source cannot leak the key, and the same inputs always give the same signature. The signing time does not depend on the secret scalar or the nonce.
+
+- **in:** sig, writable for sig_cap bytes (CR_P384_ECDSA_SIG_MAX = 104 always suffices); sig_len, receives the length; msg readable for n bytes (msg may be 0 only when n == 0); hash a CR_HASH_* id; sk the secret scalar
+- **returns:** CR_OK; CR_E_ARG (null pointer, negative n or sig_cap, unknown hash id); CR_E_KEY if the scalar is 0 or not lower than the group order; CR_E_SPACE if sig_cap is smaller than the DER length (nothing is written). On every error *sig_len is 0
+- **owns:** sk is secret caller memory; every temporary (nonce, DRBG state, scalars) is wiped before return
+- **thread:** any thread (no shared state)
+
+```mettle
+var sl: int64; if (cr_p384_ecdsa_sign(&sig[0], 104, &sl, m.chars, (int64)m.length, CR_HASH_SHA384, &sk) != CR_OK) { fail(); }
+```
+
+### cr_p384_ecdsa_verify
+
+```mettle
+export fn cr_p384_ecdsa_verify(sig: uint8*, sig_len: int64, msg: uint8*, n: int64, hash: int32, pk: uint8*, pk_len: int64) -> bool
+```
+
+Verifies an ECDSA P-384 signature over a message. The message is hashed with the chosen hash (CR_HASH_SHA256, CR_HASH_SHA384 or CR_HASH_SHA512). The public key is the 97-byte point 0x04 || X || Y and is fully validated (coordinates below the field prime, on the curve). The signature must be strict DER: it is converted to r || s and encoded again, and the two encodings must be byte-identical (no leading zeros, no BER forms); r and s must be in [1, n-1]. Only public data is used.
+
+- **in:** sig readable for sig_len bytes; msg readable for n bytes (msg may be 0 only when n == 0); hash a CR_HASH_* id; pk readable for pk_len bytes
+- **returns:** true only for a valid signature; false for an invalid one and for every error (null pointer, negative length, unknown hash, bad key or signature encoding): it fails closed
+- **owns:** nothing
+- **thread:** any thread (no shared state)
+
+```mettle
+if (!cr_p384_ecdsa_verify(&sig[0], sl, m.chars, (int64)m.length, CR_HASH_SHA384, &pk[0], 97)) { reject(); }
+```
+
 ## rsa/rsa
 
-RSA signature verification in pure Mettle: RSASSA-PKCS1-v1_5 (RFC 8017 sections 8.2.2 and 9.2) and RSASSA-PSS (sections 8.1.2 and 9.1.2, with MGF1 from appendix B.2.1), over the 31-bit big integers of crypto/ecc/i31.
+RSA signatures in pure Mettle: RSASSA-PKCS1-v1_5 (RFC 8017 sections 8.2 and 9.2) and RSASSA-PSS (sections 8.1 and 9.1, with MGF1 from appendix B.2.1), signing and verifying, over the 31-bit big integers of crypto/ecc/i31.
 
 ### cr_rsa_verify_pkcs1
 
@@ -2371,6 +2510,71 @@ Verifies an RSASSA-PSS signature (RFC 8017 8.1.2) over a message. The message is
 
 ```mettle
 if (cr_rsa_verify_pss(sig, sl, m, n, CR_HASH_SHA256, mod, ml, e, el)) { accept(); }
+```
+
+### CrRsaPrivate
+
+```mettle
+export struct CrRsaPrivate {
+  n: uint8*;
+  n_len: int64;
+  e: uint8*;
+  e_len: int64;
+  p: uint8*;
+  p_len: int64;
+  q: uint8*;
+  q_len: int64;
+  dp: uint8*;
+  dp_len: int64;
+  dq: uint8*;
+  dq_len: int64;
+  qinv: uint8*;
+  qinv_len: int64;
+}
+```
+
+An RSA private key for signing, as the big-endian bytes of the fields of a PKCS#1 RSAPrivateKey (RFC 8017 A.1.2): modulus n, public exponent e, primes p and q, dp = d mod (p - 1), dq = d mod (q - 1) and qinv = q^-1 mod p. Leading zero bytes are allowed on every field. The modulus has 2048 to 4096 bits; p and q have at most 2080 bits each and are odd.
+
+- **in:** pointers to the field bytes and their lengths; each pointer is readable for its length (zero the struct when declared: `var k: CrRsaPrivate;`)
+- **owns:** the struct holds pointers only; the caller owns the bytes they point to and wipes p, q, dp, dq and qinv with cr_wipe when done
+- **thread:** any thread (no shared state)
+
+```mettle
+var k: CrRsaPrivate; k.n = n; k.n_len = nl; k.e = e; k.e_len = el; k.p = p; k.p_len = pl; k.q = q; k.q_len = ql; k.dp = dp; k.dp_len = dpl; k.dq = dq; k.dq_len = dql; k.qinv = qi; k.qinv_len = qil;
+```
+
+### cr_rsa_sign_pss
+
+```mettle
+export fn cr_rsa_sign_pss(sig: uint8*, sig_cap: int64, sig_len: int64*, msg: uint8*, n: int64, hash: int32, key: CrRsaPrivate*) -> int32
+```
+
+Signs a message with RSASSA-PSS (RFC 8017 8.1.1 and 9.1.1). The message is hashed with the CR_HASH_* choice; MGF1 uses the same hash, the salt is as long as the hash and fresh from cr_random_bytes, and the trailer is 0xbc. The signature is as long as the modulus (2048 to 4096 bits); cr_rsa_verify_pss accepts it. The private operation uses the Chinese remainder theorem in constant time in p, q, dp, dq, qinv and the message. Before the signature is returned the public operation is run on it and compared with the padded message; if that differs (a fault, or a damaged key) the output is wiped and CR_E_INTERNAL is returned. Signatures differ on every call (random salt).
+
+- **in:** sig, writable for sig_cap bytes (the modulus length always suffices; 512 is the most); sig_len, receives the length; msg readable for n bytes (msg may be 0 only when n == 0); hash is CR_HASH_SHA256, CR_HASH_SHA384 or CR_HASH_SHA512; key as described at CrRsaPrivate
+- **returns:** CR_OK; CR_E_ARG (null pointer, negative n or sig_cap, unknown hash, bad key part: modulus outside 2048..4096 bits or even, bad exponent, p or q even, empty or oversized, p and q not matching the modulus length); CR_E_SPACE if sig_cap is smaller than the modulus length (nothing is written, *sig_len is the length needed); CR_E_INTERNAL if the random source fails, the private operation fails (message not lower than p*q) or the fault check fails (sig is zeroed). On every other error *sig_len is 0
+- **owns:** the key bytes stay with the caller, who wipes them; every secret temporary (big integers, salt) is wiped before return
+- **thread:** any thread (no shared state)
+
+```mettle
+var sl: int64; if (cr_rsa_sign_pss(&sig[0], 512, &sl, m.chars, (int64)m.length, CR_HASH_SHA256, &key) != CR_OK) { fail(); }
+```
+
+### cr_rsa_sign_pkcs1
+
+```mettle
+export fn cr_rsa_sign_pkcs1(sig: uint8*, sig_cap: int64, sig_len: int64*, msg: uint8*, n: int64, hash: int32, key: CrRsaPrivate*) -> int32
+```
+
+Signs a message with RSASSA-PKCS1-v1_5 (RFC 8017 8.2.1 and 9.2). The message is hashed with the CR_HASH_* choice and encoded as 00 01 FF..FF 00 DigestInfo(hash, NULL parameters) H, as long as the modulus. The signature is as long as the modulus (2048 to 4096 bits) and is deterministic; cr_rsa_verify_pkcs1 accepts it. The private operation uses the Chinese remainder theorem in constant time in p, q, dp, dq, qinv and the message. Before the signature is returned the public operation is run on it and compared with the padded message; if that differs (a fault, or a damaged key) the output is wiped and CR_E_INTERNAL is returned.
+
+- **in:** sig, writable for sig_cap bytes (the modulus length always suffices; 512 is the most); sig_len, receives the length; msg readable for n bytes (msg may be 0 only when n == 0); hash is CR_HASH_SHA256, CR_HASH_SHA384 or CR_HASH_SHA512; key as described at CrRsaPrivate
+- **returns:** CR_OK; CR_E_ARG (null pointer, negative n or sig_cap, unknown hash, bad key part: modulus outside 2048..4096 bits or even, bad exponent, p or q even, empty or oversized, p and q not matching the modulus length); CR_E_SPACE if sig_cap is smaller than the modulus length (nothing is written, *sig_len is the length needed); CR_E_INTERNAL if the private operation fails (message not lower than p*q) or the fault check fails (sig is zeroed). On every other error *sig_len is 0
+- **owns:** the key bytes stay with the caller, who wipes them; every secret temporary (big integers) is wiped before return
+- **thread:** any thread (no shared state)
+
+```mettle
+var sl: int64; if (cr_rsa_sign_pkcs1(&sig[0], 512, &sl, m.chars, (int64)m.length, CR_HASH_SHA256, &key) != CR_OK) { fail(); }
 ```
 
 ## recipes/signed

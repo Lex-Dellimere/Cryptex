@@ -75,8 +75,8 @@ fn main() -> int32 {
 | Encryption for TLS | `cr_aes_gcm_init`, `_encrypt`, `_decrypt` | AES-128/256-GCM, FIPS 197 + NIST SP 800-38D |
 | Key exchange | `cr_x25519_*`, `cr_kx_*` | X25519, RFC 7748 |
 | Signatures | `cr_ed25519_*` | Ed25519, RFC 8032 |
-| NIST P-256 | `cr_p256_keypair`, `cr_p256_ecdh`, `cr_p256_ecdsa_sign`, `_verify` | FIPS 186-5, SEC 1, RFC 6979 |
-| RSA signatures | `cr_rsa_verify_pkcs1`, `cr_rsa_verify_pss` | RFC 8017 |
+| NIST P-256, P-384 | `cr_p256_*`, `cr_p384_*`: key pairs, ECDH, ECDSA sign and verify | FIPS 186-5, SEC 1, RFC 6979 |
+| RSA signatures | `cr_rsa_verify_pkcs1`, `cr_rsa_verify_pss`, `cr_rsa_sign_pss`, `cr_rsa_sign_pkcs1` | RFC 8017 |
 | Encoding | `cr_hex_*`, `cr_base64url_*` | RFC 4648 |
 
 SHA-1 is inside, but only for TOTP. It is not offered on its own.
@@ -89,8 +89,8 @@ src/core/           status codes, types, random, compare, wipe, hex/base64url
 src/hash/           SHA-256, SHA-512, BLAKE2b (SHA-1 is internal, for TOTP)
 src/mac/            HMAC, HKDF
 src/cipher/         XChaCha20-Poly1305, ChaCha20-Poly1305
-src/ecc/            X25519, Ed25519, P-256 (ECDH, ECDSA), big integers
-src/rsa/            RSA signature verification
+src/ecc/            X25519, Ed25519, P-256 and P-384 (ECDH, ECDSA), big integers
+src/rsa/            RSA signatures (PKCS#1 v1.5, PSS)
 src/password/       Argon2id password hashing
 src/recipes/        signed values, tokens and codes, seal/open, TOTP
 tests/              test programs; test data in tests/vectors/

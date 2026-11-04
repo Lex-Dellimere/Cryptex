@@ -21,11 +21,13 @@
 //              chacha, poly1305, aes and ghash are internal
 //   ecc/       kx: cr_x25519_*, cr_kx_* (RFC 7748); sign: cr_ed25519_*
 //              (RFC 8032); p256: cr_p256_* (key pairs and ECDH on NIST
-//              P-256, FIPS 186-5); ecdsa: cr_p256_ecdsa_sign/_verify (DER,
-//              RFC 6979 nonces); curve25519 and i31 (big integers) are
+//              P-256, FIPS 186-5); p384: cr_p384_* (key pairs and
+//              ECDH on P-384); ecdsa: cr_p256_ecdsa_* and cr_p384_ecdsa_*
+//              (DER, RFC 6979 nonces); curve25519 and i31 (big integers) are
 //              internal
 //   password/  pwhash: cr_pwhash_* (Argon2id, RFC 9106); argon2 is internal
-//   rsa/       cr_rsa_verify_pkcs1, cr_rsa_verify_pss (RFC 8017)
+//   rsa/       cr_rsa_verify_pkcs1, cr_rsa_verify_pss, cr_rsa_sign_pss,
+//              cr_rsa_sign_pkcs1 (RFC 8017)
 //   recipes/   signed (signed values), token (tokens and recovery codes),
 //              seal (cr_seal, cr_open), totp (2FA codes, RFC 4226 and 6238)
 //
@@ -43,6 +45,7 @@ import "crypto/cipher/gcm";
 import "crypto/ecc/kx";
 import "crypto/ecc/sign";
 import "crypto/ecc/p256";
+import "crypto/ecc/p384";
 import "crypto/ecc/ecdsa";
 import "crypto/rsa/rsa";
 import "crypto/core/encode";
