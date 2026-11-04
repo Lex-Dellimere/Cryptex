@@ -4,7 +4,7 @@ Generated from the `///` contracts in `src/`. Do not edit by hand.
 
 Pure Mettle: no C, no shared state. Every function is safe on any thread.
 
-Primitives: [core/status](#corestatus), [core/types](#coretypes), [core/util](#coreutil), [core/encode](#coreencode), [hash/hash](#hashhash), [mac/mac](#macmac), [mac/kdf](#mackdf), [password/pwhash](#passwordpwhash), [cipher/aead](#cipheraead), [ecc/kx](#ecckx), [ecc/sign](#eccsign).
+Primitives: [core/status](#corestatus), [core/types](#coretypes), [core/util](#coreutil), [core/encode](#coreencode), [hash/hash](#hashhash), [mac/mac](#macmac), [mac/kdf](#mackdf), [password/pwhash](#passwordpwhash), [cipher/aead](#cipheraead), [cipher/gcm](#ciphergcm), [ecc/kx](#ecckx), [ecc/sign](#eccsign).
 Recipes: [recipes/signed](#recipessigned), [recipes/token](#recipestoken), [recipes/seal](#recipesseal), [recipes/totp](#recipestotp).
 
 ## core/status
@@ -1889,6 +1889,98 @@ Verifies and decrypts ct (ciphertext || tag) produced by cr_chacha20poly1305_enc
 
 ```mettle
 if (cr_chacha20poly1305_decrypt(&pt[0], 64, &plen, &ct[0], clen, 0, 0, &nonce, &k) != CR_OK) { reject(); }
+```
+
+## cipher/gcm
+
+AES-128-GCM and AES-256-GCM (NIST SP 800-38D) with a 96-bit IV, in pure Mettle and constant time: bitsliced AES with no lookup tables (aes.mettle) and GHASH from masked 64-bit multiplications (ghash.mettle), both ported from BearSSL.
+
+### CrAesGcm
+
+```mettle
+export struct CrAesGcm {
+  skey: uint64[120];
+  h: uint8[16];
+  rounds: uint32;
+  ready: uint32;
+}
+```
+
+An AES-128-GCM or AES-256-GCM key, ready for cr_aes_gcm_*: the expanded AES round keys and the GHASH key. Initialize it once with cr_aes_gcm_init and use it for any number of messages.
+
+- **in:** - (zeroed when declared: `var x: CrAesGcm;`; a zeroed context is not initialized and every use returns CR_E_ARG)
+- **owns:** secret: wipe with cr_aes_gcm_wipe(&ctx) when done
+- **thread:** any thread (no shared state)
+
+```mettle
+var ctx: CrAesGcm; cr_aes_gcm_init(&ctx, &key[0], 32); defer cr_aes_gcm_wipe(&ctx);
+```
+
+### cr_aes_gcm_init
+
+```mettle
+export fn cr_aes_gcm_init(ctx: CrAesGcm*, key: uint8*, keylen: int64) -> int32
+```
+
+Prepares an AES-128-GCM or AES-256-GCM key: expands the AES round keys and derives the GHASH key H = AES_K(0^128). The key is not kept in its original form. Any previous contents of ctx are replaced.
+
+- **in:** ctx; key readable for keylen bytes; keylen, 16 (AES-128) or 32 (AES-256)
+- **returns:** CR_OK; CR_E_ARG (null ctx or key, keylen other than 16 or 32; ctx is then left zeroed and not initialized)
+- **owns:** ctx is secret caller memory: cr_aes_gcm_wipe(&ctx) when done; the caller also wipes its copy of the key
+- **thread:** any thread (no shared state)
+
+```mettle
+var ctx: CrAesGcm; if (cr_aes_gcm_init(&ctx, &key[0], 16) != CR_OK) { return 1; }
+```
+
+### cr_aes_gcm_encrypt
+
+```mettle
+export fn cr_aes_gcm_encrypt(ctx: CrAesGcm*, ct: uint8*, ct_cap: int64, ct_len: int64*, msg: uint8*, mlen: int64, ad: uint8*, adlen: int64, nonce: CrNonce12*) -> int32
+```
+
+Encrypts and authenticates msg, and authenticates (does not encrypt) ad, with AES-GCM (NIST SP 800-38D, 96-bit IV). Output is ciphertext || 16-byte tag. Never use the same key with the same nonce twice.
+
+- **in:** ctx initialized with cr_aes_gcm_init; ct writable for ct_cap bytes, ct_cap >= mlen + 16 (ct may equal msg for in-place encryption; no other overlap); ct_len, where the ciphertext length goes; msg/mlen the plaintext (mlen <= 68719476704, 2^36 - 32); ad/adlen associated data (0, 0 for none); nonce, 12 bytes, unique per key
+- **returns:** CR_OK and *ct_len = mlen + 16; CR_E_ARG (null pointer with a non-zero length, negative length, mlen above 68719476704, ctx not initialized, null ctx/nonce/ct_len); CR_E_SPACE if ct_cap is too small (nothing written, *ct_len = 0)
+- **owns:** nothing; the caller owns every buffer and must wipe the plaintext when done
+- **thread:** any thread (no shared state)
+
+```mettle
+cr_aes_gcm_encrypt(&ctx, &ct[0], 64, &clen, m.chars, (int64)m.length, 0, 0, &nonce);
+```
+
+### cr_aes_gcm_decrypt
+
+```mettle
+export fn cr_aes_gcm_decrypt(ctx: CrAesGcm*, pt: uint8*, pt_cap: int64, pt_len: int64*, ct: uint8*, clen: int64, ad: uint8*, adlen: int64, nonce: CrNonce12*) -> int32
+```
+
+Verifies and decrypts ct (ciphertext || tag) produced by cr_aes_gcm_encrypt with the same key, nonce and ad. The tag is checked (in constant time) before anything is decrypted. Fails closed.
+
+- **in:** ctx initialized with cr_aes_gcm_init; pt writable for pt_cap bytes, pt_cap >= clen - 16 (pt may equal ct for in-place decryption); pt_len; ct/clen (clen - 16 <= 68719476704); ad/adlen; nonce
+- **returns:** CR_OK and *pt_len = clen - 16; CR_E_VERIFY if the tag does not match (wrong key, nonce or ad, tampered or truncated ciphertext, clen < 16); CR_E_ARG (including ctx not initialized and a message above 68719476704 bytes); CR_E_SPACE. On every failure *pt_len = 0 and the first pt_cap bytes of pt are wiped (cr_wipe), so no unauthenticated plaintext ever reaches the caller (when decrypting in place, pt == ct, that also wipes the ciphertext)
+- **owns:** nothing; the caller owns every buffer and must wipe the plaintext when done
+- **thread:** any thread (no shared state)
+
+```mettle
+if (cr_aes_gcm_decrypt(&ctx, &pt[0], 64, &plen, &ct[0], clen, 0, 0, &nonce) != CR_OK) { reject(); }
+```
+
+### cr_aes_gcm_wipe
+
+```mettle
+export fn cr_aes_gcm_wipe(ctx: CrAesGcm*)
+```
+
+Erases a CrAesGcm (round keys and GHASH key) and marks it uninitialized. Call it when the key is no longer needed.
+
+- **in:** ctx, may be null (nothing happens)
+- **owns:** nothing; the caller still owns ctx
+- **thread:** any thread (no shared state)
+
+```mettle
+defer cr_aes_gcm_wipe(&ctx);
 ```
 
 ## ecc/kx

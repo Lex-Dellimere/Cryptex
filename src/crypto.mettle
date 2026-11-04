@@ -17,7 +17,8 @@
 //   mac/       mac: cr_hmac_sha256*, cr_hmac_sha512* (RFC 2104)
 //              kdf: cr_hkdf_sha256* (RFC 5869)
 //   cipher/    aead: cr_aead_* (XChaCha20-Poly1305) and cr_chacha20poly1305_*
-//              (RFC 8439); chacha and poly1305 are internal
+//              (RFC 8439); gcm: cr_aes_gcm_* (AES-128/256-GCM, NIST SP 800-38D);
+//              chacha, poly1305, aes and ghash are internal
 //   ecc/       kx: cr_x25519_*, cr_kx_* (RFC 7748); sign: cr_ed25519_*
 //              (RFC 8032); curve25519 is internal
 //   password/  pwhash: cr_pwhash_* (Argon2id, RFC 9106); argon2 is internal
@@ -34,6 +35,7 @@ import "crypto/mac/mac";
 import "crypto/mac/kdf";
 import "crypto/password/pwhash";
 import "crypto/cipher/aead";
+import "crypto/cipher/gcm";
 import "crypto/ecc/kx";
 import "crypto/ecc/sign";
 import "crypto/core/encode";

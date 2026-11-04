@@ -1,0 +1,389 @@
+// AES-128-GCM and AES-256-GCM (NIST SP 800-38D): the FIPS 197 Appendix C.1
+// and C.3 block examples through the internal block encryption, the CTR
+// keystream against single-block encryption, every row of NIST CAVP
+// (tests/vectors/vec_cavp_aes_gcm.mettle) and Wycheproof
+// (tests/vectors/vec_wp_aes_gcm.mettle), in-place use, one context for many
+// messages, wiping, and the argument and capacity checks. Vector rows are
+// key | iv | aad | pt | ct||tag | v-or-i: "v" must encrypt to exactly
+// ct||tag and decrypt back, "i" must be rejected with CR_E_VERIFY and an
+// all-zero output.
+import "crypto/crypto";
+import "crypto/cipher/aes";
+import "tcheck";
+import "vectors/vec_cavp_aes_gcm";
+import "vectors/vec_wp_aes_gcm";
+
+fn fips197_block(label: string, keyhex: string, keylen: int64, want: string) {
+  var key: uint8[32];
+  var pt: uint8[16];
+  var out: uint8[16];
+  var comp: uint64[30];
+  var sk: uint64[120];
+  tc_unhex(keyhex, &key[0], 32);
+  tc_unhex("00112233445566778899aabbccddeeff", &pt[0], 16);
+  var rounds: uint32 = crx_aes_keysched(&comp[0], &key[0], keylen);
+  tc_ok(label + " rounds", (keylen == 16 && rounds == 10) || (keylen == 32 && rounds == 14));
+  crx_aes_skey_expand(&sk[0], rounds, &comp[0]);
+  crx_aes_encrypt_block(&sk[0], rounds, &out[0], &pt[0]);
+  tc_hex_eq(label + " ciphertext", &out[0], 16, want);
+  // In place.
+  crx_aes_encrypt_block(&sk[0], rounds, &pt[0], &pt[0]);
+  tc_hex_eq(label + " in place", &pt[0], 16, want);
+}
+
+fn fips197() {
+  fips197_block("C.1 AES-128", "000102030405060708090a0b0c0d0e0f00000000000000000000000000000000", 16,
+    "69c4e0d86a7b0430d8cdb78070b4c55a");
+  fips197_block("C.3 AES-256", "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", 32,
+    "8ea2b7ca516745bfeafc49904b496089");
+  var key: uint8[32];
+  var comp: uint64[30];
+  tc_ok("keysched rejects 15 bytes", crx_aes_keysched(&comp[0], &key[0], 15) == 0);
+  tc_ok("keysched takes 24 bytes", crx_aes_keysched(&comp[0], &key[0], 24) == 12);
+}
+
+// The four-block CTR keystream equals the block cipher on the counter blocks,
+// for lengths around the 16- and 64-byte boundaries and across the 32-bit
+// counter wrap.
+fn ctr_vs_block() {
+  var key: uint8[32];
+  var comp: uint64[30];
+  var sk: uint64[120];
+  var iv: uint8[12];
+  var zero: uint8[300];
+  var ks: uint8[300];
+  var want: uint8[320];
+  var blk: uint8[16];
+  var i: int32 = 0;
+  while (i < 32) {
+    key[i] = (uint8)(i * 7 + 3);
+    i = i + 1;
+  }
+  i = 0;
+  while (i < 12) {
+    iv[i] = (uint8)(0xa0 + i);
+    i = i + 1;
+  }
+  tc_fill(&zero[0], 300, 0);
+  var kl: int32 = 0;
+  while (kl < 2) {
+    var keylen: int64 = 16;
+    if (kl == 1) { keylen = 32; }
+    var rounds: uint32 = crx_aes_keysched(&comp[0], &key[0], keylen);
+    crx_aes_skey_expand(&sk[0], rounds, &comp[0]);
+    var starts: uint32[3] = [(uint32)1, (uint32)0xfffffffd, (uint32)0xffffffff];
+    var s: int32 = 0;
+    while (s < 3) {
+      var cc: uint32 = starts[s];
+      var nb: int32 = 0;
+      while (nb < 19) {
+        var c: uint32 = cc + (uint32)nb;
+        var j: int32 = 0;
+        while (j < 12) {
+          blk[j] = iv[j];
+          j = j + 1;
+        }
+        blk[12] = (uint8)(c >> 24);
+        blk[13] = (uint8)(c >> 16);
+        blk[14] = (uint8)(c >> 8);
+        blk[15] = (uint8)c;
+        crx_aes_encrypt_block(&sk[0], rounds, &want[nb * 16], &blk[0]);
+        nb = nb + 1;
+      }
+      var lens: int64[9] = [(int64)0, (int64)1, (int64)15, (int64)16, (int64)17, (int64)63, (int64)64, (int64)65, (int64)300];
+      var li: int32 = 0;
+      while (li < 9) {
+        var n: int64 = lens[li];
+        var next: uint32 = crx_aes_ctr_xor(&sk[0], rounds, &iv[0], cc, &ks[0], &zero[0], n);
+        tc_ok("ctr keystream key {keylen} start {s} len {n}", cr_equal(&ks[0], &want[0], n));
+        tc_ok("ctr counter after key {keylen} start {s} len {n}", next == cc + (uint32)(n / 64 * 4 + n % 64 / 16));
+        li = li + 1;
+      }
+      s = s + 1;
+    }
+    kl = kl + 1;
+  }
+}
+
+// Runs one vector row. Returns nothing; every outcome is a check.
+fn gcm_row(label: string, row: string) {
+  var key: uint8[32];
+  var iv: CrNonce12;
+  var ad: uint8[600];
+  var pt: uint8[600];
+  var want: uint8[600];
+  var ct: uint8[600];
+  var out: uint8[600];
+  var ctx: CrAesGcm;
+  var e: string = tc_field(row, 5);
+  var klen: int64 = tc_unhex(tc_field(row, 0), &key[0], 32);
+  var ivlen: int64 = tc_unhex(tc_field(row, 1), &iv.b[0], 12);
+  var adlen: int64 = tc_unhex(tc_field(row, 2), &ad[0], 600);
+  var plen: int64 = tc_unhex(tc_field(row, 3), &pt[0], 600);
+  var wlen: int64 = tc_unhex(tc_field(row, 4), &want[0], 600);
+  tc_ok(label + " fields", (klen == 16 || klen == 32) && ivlen == 12 && adlen >= 0 && plen >= 0 && wlen >= 16);
+  tc_rc(label + " init", cr_aes_gcm_init(&ctx, &key[0], klen), CR_OK);
+  var n: int64 = 0;
+  if (e == "v") {
+    tc_ok(label + " lengths", wlen == plen + 16);
+    tc_fill(&ct[0], 600, 255);
+    var clen: int64 = 0;
+    tc_rc(label + " encrypt", cr_aes_gcm_encrypt(&ctx, &ct[0], 600, &clen, &pt[0], plen, &ad[0], adlen, &iv), CR_OK);
+    tc_ok(label + " ciphertext", clen == wlen && cr_equal(&ct[0], &want[0], wlen));
+    tc_ok(label + " nothing past the tag", ct[wlen] == 255);
+    tc_fill(&out[0], 600, 255);
+    tc_rc(label + " decrypt", cr_aes_gcm_decrypt(&ctx, &out[0], 600, &n, &want[0], wlen, &ad[0], adlen, &iv), CR_OK);
+    tc_ok(label + " plaintext", n == plen && cr_equal(&out[0], &pt[0], plen));
+  } else {
+    tc_fill(&out[0], 600, 255);
+    n = 77;
+    tc_rc(label + " decrypt (invalid)", cr_aes_gcm_decrypt(&ctx, &out[0], 600, &n, &want[0], wlen, &ad[0], adlen, &iv), CR_E_VERIFY);
+    tc_ok(label + " no length", n == 0);
+    tc_ok(label + " output wiped", tc_all_zero(&out[0], 600));
+  }
+  cr_aes_gcm_wipe(&ctx);
+  cr_wipe(&key[0], 32);
+}
+
+fn vector_rows() {
+  for r in 0..VEC_CAVP_AES_GCM_N {
+    gcm_row("cavp row {r}", VEC_CAVP_AES_GCM[r]);
+  }
+  for r in 0..VEC_WP_AES_GCM_N {
+    gcm_row("wycheproof row {r}", VEC_WP_AES_GCM[r]);
+  }
+}
+
+fn in_place() {
+  var key: uint8[32];
+  var iv: CrNonce12;
+  var ad: uint8[20];
+  var ctx: CrAesGcm;
+  var ref: uint8[200];
+  var buf: uint8[200];
+  var plain: uint8[200];
+  var i: int32 = 0;
+  while (i < 200) {
+    plain[i] = (uint8)(i * 13 + 1);
+    i = i + 1;
+  }
+  i = 0;
+  while (i < 32) {
+    key[i] = (uint8)(255 - i);
+    i = i + 1;
+  }
+  tc_fill(&ad[0], 20, 66);
+  tc_fill(&iv.b[0], 12, 9);
+  var keylen: int64 = 16;
+  while (keylen <= 32) {
+    var lens: int64[8] = [(int64)0, (int64)1, (int64)15, (int64)16, (int64)17, (int64)64, (int64)100, (int64)184];
+    tc_rc("in place init", cr_aes_gcm_init(&ctx, &key[0], keylen), CR_OK);
+    var li: int32 = 0;
+    while (li < 8) {
+      var m: int64 = lens[li];
+      var clen: int64 = 0;
+      var plen: int64 = 0;
+      tc_rc("separate buffers encrypt len {m}", cr_aes_gcm_encrypt(&ctx, &ref[0], 200, &clen, &plain[0], m, &ad[0], 20, &iv), CR_OK);
+      // In place encrypt.
+      i = 0;
+      while (i < 200) {
+        buf[i] = plain[i];
+        i = i + 1;
+      }
+      tc_rc("in place encrypt len {m}", cr_aes_gcm_encrypt(&ctx, &buf[0], 200, &clen, &buf[0], m, &ad[0], 20, &iv), CR_OK);
+      tc_ok("in place encrypt matches len {m}", clen == m + 16 && cr_equal(&buf[0], &ref[0], m + 16));
+      // In place decrypt.
+      tc_rc("in place decrypt len {m}", cr_aes_gcm_decrypt(&ctx, &buf[0], 200, &plen, &buf[0], clen, &ad[0], 20, &iv), CR_OK);
+      tc_ok("in place decrypt matches len {m}", plen == m && cr_equal(&buf[0], &plain[0], m));
+      // In place decrypt of a forgery wipes the buffer.
+      i = 0;
+      while (i < 200) {
+        buf[i] = ref[i];
+        i = i + 1;
+      }
+      buf[m + 15] = buf[m + 15] ^ 1;
+      plen = 5;
+      tc_rc("in place forgery len {m}", cr_aes_gcm_decrypt(&ctx, &buf[0], 200, &plen, &buf[0], clen, &ad[0], 20, &iv), CR_E_VERIFY);
+      tc_ok("in place forgery wiped len {m}", plen == 0 && tc_all_zero(&buf[0], 200));
+      li = li + 1;
+    }
+    cr_aes_gcm_wipe(&ctx);
+    keylen = keylen + 16;
+  }
+}
+
+// One context, many messages: different nonces and lengths, then tamper
+// detection on each of tag, ciphertext, ad, nonce and key.
+fn many_messages() {
+  var key: uint8[32];
+  var iv: CrNonce12;
+  var ctx: CrAesGcm;
+  var ctx2: CrAesGcm;
+  var plain: uint8[300];
+  var ct: uint8[320];
+  var back: uint8[320];
+  var ad: uint8[8];
+  var i: int32 = 0;
+  while (i < 300) {
+    plain[i] = (uint8)(i * 5 + 7);
+    i = i + 1;
+  }
+  tc_fill(&key[0], 32, 17);
+  tc_fill(&ad[0], 8, 3);
+  tc_rc("many init", cr_aes_gcm_init(&ctx, &key[0], 32), CR_OK);
+  var seen: uint8[16];
+  var round: int32 = 0;
+  var distinct: bool = true;
+  while (round < 40) {
+    iv.b[11] = (uint8)round;
+    iv.b[3] = (uint8)(round * 3);
+    var m: int64 = (int64)(round * 7);
+    var clen: int64 = 0;
+    var plen: int64 = 0;
+    tc_rc("many encrypt {round}", cr_aes_gcm_encrypt(&ctx, &ct[0], 320, &clen, &plain[0], m, &ad[0], 8, &iv), CR_OK);
+    tc_rc("many decrypt {round}", cr_aes_gcm_decrypt(&ctx, &back[0], 320, &plen, &ct[0], clen, &ad[0], 8, &iv), CR_OK);
+    tc_ok("many roundtrip {round}", plen == m && cr_equal(&back[0], &plain[0], m));
+    if (round == 0) {
+      i = 0;
+      while (i < 16) {
+        seen[i] = ct[m + i];
+        i = i + 1;
+      }
+    } else if (cr_equal(&seen[0], &ct[m], 16)) {
+      distinct = false;
+    }
+    if (round == 9) {
+      // Tampering, on the 63-byte message.
+      var t: int32 = 0;
+      while (t < 6) {
+        var bad: uint8[320];
+        i = 0;
+        while (i < 320) {
+          bad[i] = ct[i];
+          i = i + 1;
+        }
+        var badad: int64 = 8;
+        var save: uint8 = iv.b[0];
+        if (t == 0) { bad[clen - 1] = bad[clen - 1] ^ 1; }
+        if (t == 1) { bad[0] = bad[0] ^ 0x80; }
+        if (t == 2) { bad[m - 1] = bad[m - 1] ^ 4; }
+        if (t == 3) { badad = 7; }
+        if (t == 4) { iv.b[0] = iv.b[0] ^ 1; }
+        if (t == 5) { clen = clen - 1; }
+        tc_fill(&back[0], 320, 255);
+        plen = 3;
+        tc_rc("tamper {t}", cr_aes_gcm_decrypt(&ctx, &back[0], 320, &plen, &bad[0], clen, &ad[0], badad, &iv), CR_E_VERIFY);
+        tc_ok("tamper {t} no output", plen == 0 && tc_all_zero(&back[0], 320));
+        iv.b[0] = save;
+        if (t == 5) { clen = clen + 1; }
+        t = t + 1;
+      }
+      // A different key must not verify.
+      key[5] = key[5] ^ 1;
+      tc_rc("other key init", cr_aes_gcm_init(&ctx2, &key[0], 32), CR_OK);
+      key[5] = key[5] ^ 1;
+      tc_rc("other key", cr_aes_gcm_decrypt(&ctx2, &back[0], 320, &plen, &ct[0], clen, &ad[0], 8, &iv), CR_E_VERIFY);
+      cr_aes_gcm_wipe(&ctx2);
+    }
+    round = round + 1;
+  }
+  tc_ok("many: tags differ", distinct);
+  cr_aes_gcm_wipe(&ctx);
+}
+
+fn wiping_and_args() {
+  var key: uint8[32];
+  var iv: CrNonce12;
+  var ctx: CrAesGcm;
+  var ct: uint8[64];
+  var out: uint8[64];
+  var msg: uint8[32];
+  var clen: int64 = 0;
+  var plen: int64 = 0;
+  tc_fill(&key[0], 32, 5);
+  tc_fill(&msg[0], 32, 6);
+
+  // Not initialized: a zeroed context, and one after a failed init.
+  tc_rc("uninitialized encrypt", cr_aes_gcm_encrypt(&ctx, &ct[0], 64, &clen, &msg[0], 16, 0, 0, &iv), CR_E_ARG);
+  tc_ok("uninitialized encrypt no length", clen == 0);
+  tc_fill(&out[0], 64, 255);
+  tc_rc("uninitialized decrypt", cr_aes_gcm_decrypt(&ctx, &out[0], 64, &plen, &ct[0], 32, 0, 0, &iv), CR_E_ARG);
+  tc_ok("uninitialized decrypt wipes", plen == 0 && tc_all_zero(&out[0], 64));
+
+  // Key lengths.
+  tc_rc("keylen 24", cr_aes_gcm_init(&ctx, &key[0], 24), CR_E_ARG);
+  tc_rc("keylen 0", cr_aes_gcm_init(&ctx, &key[0], 0), CR_E_ARG);
+  tc_rc("keylen 31", cr_aes_gcm_init(&ctx, &key[0], 31), CR_E_ARG);
+  tc_rc("keylen -16", cr_aes_gcm_init(&ctx, &key[0], -16), CR_E_ARG);
+  tc_rc("null key", cr_aes_gcm_init(&ctx, 0, 16), CR_E_ARG);
+  tc_rc("null ctx", cr_aes_gcm_init(0, &key[0], 16), CR_E_ARG);
+  tc_rc("failed init stays uninitialized", cr_aes_gcm_encrypt(&ctx, &ct[0], 64, &clen, &msg[0], 16, 0, 0, &iv), CR_E_ARG);
+  tc_rc("init 16", cr_aes_gcm_init(&ctx, &key[0], 16), CR_OK);
+  tc_rc("usable", cr_aes_gcm_encrypt(&ctx, &ct[0], 64, &clen, &msg[0], 16, 0, 0, &iv), CR_OK);
+  tc_rc("failed re-init clears the context", cr_aes_gcm_init(&ctx, &key[0], 24), CR_E_ARG);
+  tc_rc("cleared", cr_aes_gcm_encrypt(&ctx, &ct[0], 64, &clen, &msg[0], 16, 0, 0, &iv), CR_E_ARG);
+
+  // Wipe zeroes the context.
+  tc_rc("init 32", cr_aes_gcm_init(&ctx, &key[0], 32), CR_OK);
+  tc_ok("initialized context is not zero", !tc_all_zero((uint8*)&ctx.skey[0], 960) && !tc_all_zero(&ctx.h[0], 16) && ctx.ready == 1 && ctx.rounds == 14);
+  cr_aes_gcm_wipe(&ctx);
+  tc_ok("wipe zeroes round keys", tc_all_zero((uint8*)&ctx.skey[0], 960));
+  tc_ok("wipe zeroes H", tc_all_zero(&ctx.h[0], 16));
+  tc_ok("wipe clears flags", ctx.ready == 0 && ctx.rounds == 0);
+  tc_rc("wiped context is unusable", cr_aes_gcm_encrypt(&ctx, &ct[0], 64, &clen, &msg[0], 16, 0, 0, &iv), CR_E_ARG);
+  cr_aes_gcm_wipe(0);
+
+  // Capacity and argument checks on a working context.
+  tc_rc("init 128", cr_aes_gcm_init(&ctx, &key[0], 16), CR_OK);
+  tc_rc("encrypt exact fit", cr_aes_gcm_encrypt(&ctx, &ct[0], 48, &clen, &msg[0], 32, 0, 0, &iv), CR_OK);
+  tc_ok("encrypt exact fit length", clen == 48);
+  clen = 5;
+  tc_fill(&ct[0], 64, 7);
+  tc_rc("encrypt one byte short", cr_aes_gcm_encrypt(&ctx, &ct[0], 47, &clen, &msg[0], 32, 0, 0, &iv), CR_E_SPACE);
+  tc_ok("encrypt short: nothing written", clen == 0 && ct[0] == 7 && ct[46] == 7);
+  tc_rc("encrypt empty message", cr_aes_gcm_encrypt(&ctx, &ct[0], 16, &clen, 0, 0, 0, 0, &iv), CR_OK);
+  tc_ok("encrypt empty length", clen == 16);
+  tc_rc("encrypt null ct_len", cr_aes_gcm_encrypt(&ctx, &ct[0], 64, 0, &msg[0], 1, 0, 0, &iv), CR_E_ARG);
+  tc_rc("encrypt null ct", cr_aes_gcm_encrypt(&ctx, 0, 64, &clen, &msg[0], 1, 0, 0, &iv), CR_E_ARG);
+  tc_rc("encrypt null ctx", cr_aes_gcm_encrypt(0, &ct[0], 64, &clen, &msg[0], 1, 0, 0, &iv), CR_E_ARG);
+  tc_rc("encrypt null nonce", cr_aes_gcm_encrypt(&ctx, &ct[0], 64, &clen, &msg[0], 1, 0, 0, 0), CR_E_ARG);
+  tc_rc("encrypt null msg", cr_aes_gcm_encrypt(&ctx, &ct[0], 64, &clen, 0, 1, 0, 0, &iv), CR_E_ARG);
+  tc_rc("encrypt null ad", cr_aes_gcm_encrypt(&ctx, &ct[0], 64, &clen, &msg[0], 1, 0, 3, &iv), CR_E_ARG);
+  tc_rc("encrypt negative mlen", cr_aes_gcm_encrypt(&ctx, &ct[0], 64, &clen, &msg[0], -1, 0, 0, &iv), CR_E_ARG);
+  tc_rc("encrypt negative adlen", cr_aes_gcm_encrypt(&ctx, &ct[0], 64, &clen, &msg[0], 1, &msg[0], -1, &iv), CR_E_ARG);
+  tc_rc("encrypt negative cap", cr_aes_gcm_encrypt(&ctx, &ct[0], -1, &clen, &msg[0], 1, 0, 0, &iv), CR_E_ARG);
+  // The message size limit is checked before any byte is touched.
+  tc_rc("encrypt 2^36 - 31 bytes", cr_aes_gcm_encrypt(&ctx, &ct[0], 68719476720, &clen, &msg[0], 68719476705, 0, 0, &iv), CR_E_ARG);
+  tc_ok("encrypt limit: no length", clen == 0);
+
+  tc_rc("encrypt for decrypt", cr_aes_gcm_encrypt(&ctx, &ct[0], 64, &clen, &msg[0], 32, 0, 0, &iv), CR_OK);
+  tc_rc("decrypt exact fit", cr_aes_gcm_decrypt(&ctx, &out[0], 32, &plen, &ct[0], clen, 0, 0, &iv), CR_OK);
+  tc_ok("decrypt exact fit length", plen == 32 && cr_equal(&out[0], &msg[0], 32));
+  tc_fill(&out[0], 64, 255);
+  tc_rc("decrypt one byte short", cr_aes_gcm_decrypt(&ctx, &out[0], 31, &plen, &ct[0], clen, 0, 0, &iv), CR_E_SPACE);
+  tc_ok("decrypt short: wiped, no length", plen == 0 && tc_all_zero(&out[0], 31) && out[31] == 255);
+  tc_fill(&out[0], 64, 255);
+  tc_rc("decrypt shorter than a tag", cr_aes_gcm_decrypt(&ctx, &out[0], 64, &plen, &ct[0], 15, 0, 0, &iv), CR_E_VERIFY);
+  tc_ok("decrypt shorter than a tag wiped", tc_all_zero(&out[0], 64));
+  tc_rc("decrypt negative clen", cr_aes_gcm_decrypt(&ctx, &out[0], 64, &plen, &ct[0], -1, 0, 0, &iv), CR_E_ARG);
+  tc_rc("decrypt null pt_len", cr_aes_gcm_decrypt(&ctx, &out[0], 64, 0, &ct[0], clen, 0, 0, &iv), CR_E_ARG);
+  tc_rc("decrypt null pt", cr_aes_gcm_decrypt(&ctx, 0, 64, &plen, &ct[0], clen, 0, 0, &iv), CR_E_ARG);
+  tc_rc("decrypt null ct", cr_aes_gcm_decrypt(&ctx, &out[0], 64, &plen, 0, clen, 0, 0, &iv), CR_E_ARG);
+  tc_rc("decrypt null ctx", cr_aes_gcm_decrypt(0, &out[0], 64, &plen, &ct[0], clen, 0, 0, &iv), CR_E_ARG);
+  tc_rc("decrypt null nonce", cr_aes_gcm_decrypt(&ctx, &out[0], 64, &plen, &ct[0], clen, 0, 0, 0), CR_E_ARG);
+  tc_rc("decrypt null ad", cr_aes_gcm_decrypt(&ctx, &out[0], 64, &plen, &ct[0], clen, 0, 4, &iv), CR_E_ARG);
+  tc_fill(&out[0], 64, 255);
+  tc_rc("decrypt 2^36 - 31 bytes", cr_aes_gcm_decrypt(&ctx, &out[0], 64, &plen, &ct[0], 68719476721, 0, 0, &iv), CR_E_ARG);
+  tc_ok("decrypt limit: wiped, no length", plen == 0 && tc_all_zero(&out[0], 64));
+  cr_aes_gcm_wipe(&ctx);
+}
+
+fn main() -> int32 {
+  fips197();
+  ctr_vs_block();
+  vector_rows();
+  in_place();
+  many_messages();
+  wiping_and_args();
+  return tc_finish("aes_gcm");
+}
