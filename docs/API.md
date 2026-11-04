@@ -647,7 +647,7 @@ export struct CrSha256State {
 
 Streaming SHA-256 state. Treat as opaque: only cr_sha256_init, _update and _final touch it. The caller provides the memory.
 
-- **owns:** the caller owns the state; _final wipes it; to abandon a hash early wipe it with cr_wipe(st, 112)
+- **owns:** the caller owns the state; _final wipes it; to abandon a hash early wipe it with cr_wipe((uint8*)st, (int64)sizeof(CrSha256State))
 - **thread:** any thread (no shared state); one thread per state
 
 ```mettle
@@ -664,7 +664,7 @@ export struct CrSha512State {
 
 Streaming SHA-512 state. Treat as opaque: only cr_sha512_init, _update and _final touch it. The caller provides the memory.
 
-- **owns:** the caller owns the state; _final wipes it; to abandon a hash early wipe it with cr_wipe(st, 208)
+- **owns:** the caller owns the state; _final wipes it; to abandon a hash early wipe it with cr_wipe((uint8*)st, (int64)sizeof(CrSha512State))
 - **thread:** any thread (no shared state); one thread per state
 
 ```mettle
@@ -681,7 +681,7 @@ export struct CrBlake2bState {
 
 Streaming BLAKE2b state. Treat as opaque: only cr_blake2b_init, _update and _final touch it. The caller provides the memory.
 
-- **owns:** the caller owns the state; _final wipes it; to abandon a hash early wipe it with cr_wipe(st, 224). A keyed state holds the key: wipe or finish it
+- **owns:** the caller owns the state; _final wipes it; to abandon a hash early wipe it with cr_wipe((uint8*)st, (int64)sizeof(CrBlake2bState)). A keyed state holds the key: wipe or finish it
 - **thread:** any thread (no shared state); one thread per state
 
 ```mettle
@@ -698,7 +698,7 @@ Starts a streaming SHA-256 hash (FIPS 180-4). Feed data with cr_sha256_update, f
 
 - **in:** st writable state
 - **returns:** CR_OK; CR_E_ARG (null st)
-- **owns:** the caller owns st; _final wipes it, or abandon it with cr_wipe(st, 112)
+- **owns:** the caller owns st; _final wipes it, or abandon it with cr_wipe((uint8*)st, (int64)sizeof(CrSha256State))
 - **thread:** any thread (no shared state)
 
 ```mettle
@@ -749,7 +749,7 @@ Starts a streaming SHA-512 hash (FIPS 180-4). Feed data with cr_sha512_update, f
 
 - **in:** st writable state
 - **returns:** CR_OK; CR_E_ARG (null st)
-- **owns:** the caller owns st; _final wipes it, or abandon it with cr_wipe(st, 208)
+- **owns:** the caller owns st; _final wipes it, or abandon it with cr_wipe((uint8*)st, (int64)sizeof(CrSha512State))
 - **thread:** any thread (no shared state)
 
 ```mettle
@@ -800,7 +800,7 @@ Starts a streaming BLAKE2b hash (RFC 7693), optionally keyed, with a chosen outp
 
 - **in:** st writable state; outlen in [16, 64]; key readable for keylen bytes, keylen 0 (unkeyed; key may be 0) or in [16, 64]
 - **returns:** CR_OK; CR_E_ARG (null st, outlen or keylen out of range, null key with keylen > 0). On error st is wiped so a later _final fails too
-- **owns:** the caller owns st and key (wipe the key yourself); st holds a copy of the key until _final wipes it, or abandon it with cr_wipe(st, 224)
+- **owns:** the caller owns st and key (wipe the key yourself); st holds a copy of the key until _final wipes it, or abandon it with cr_wipe((uint8*)st, (int64)sizeof(CrBlake2bState))
 - **thread:** any thread (no shared state)
 
 ```mettle

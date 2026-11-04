@@ -280,7 +280,7 @@ export fn crx_sha256_final(s: CrxSha256*, out: uint8*) {
   for j in 0..8 {
     crx_store32be(&out[j * 4], s->h[j]);
   }
-  cr_wipe((uint8*)s, 112);
+  cr_wipe((uint8*)s, (int64)sizeof(CrxSha256));
 }
 
 /// internal: starts a SHA-512 computation.
@@ -339,5 +339,5 @@ export fn crx_sha512_final(s: CrxSha512*, out: uint8*) {
   for j in 0..8 {
     crx_store64be(&out[j * 8], s->h[j]);
   }
-  cr_wipe((uint8*)s, 208);
+  cr_wipe((uint8*)s, (int64)sizeof(CrxSha512));
 }

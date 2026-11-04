@@ -35,7 +35,7 @@ fn sha256_row(label: string, msg: uint8*, n: int64, want: string) {
     tc_rc(label + " update null 0", cr_sha256_update(&st, 0, 0), CR_OK);
     tc_rc(label + " final", cr_sha256_final(&st, &d), CR_OK);
     tc_hex_eq(label + " piece {step}", &d.b[0], 32, want);
-    tc_ok(label + " state wiped", tc_all_zero((uint8*)&st, 112));
+    tc_ok(label + " state wiped", tc_all_zero((uint8*)&st, (int64)sizeof(CrSha256State)));
   }
 }
 
@@ -56,7 +56,7 @@ fn sha512_row(label: string, msg: uint8*, n: int64, want: string) {
     tc_rc(label + " update null 0", cr_sha512_update(&st, 0, 0), CR_OK);
     tc_rc(label + " final", cr_sha512_final(&st, &d), CR_OK);
     tc_hex_eq(label + " piece {step}", &d.b[0], 64, want);
-    tc_ok(label + " state wiped", tc_all_zero((uint8*)&st, 208));
+    tc_ok(label + " state wiped", tc_all_zero((uint8*)&st, (int64)sizeof(CrSha512State)));
   }
 }
 
@@ -65,9 +65,9 @@ fn blake2b_row(label: string, msg: uint8*, n: int64, key: uint8*, keylen: int64,
   if (keylen != 0 && (keylen < CR_BLAKE2B_KEY_MIN || keylen > CR_BLAKE2B_MAX)) { bad = true; }
   if (bad) {
     var st: CrBlake2bState;
-    tc_fill((uint8*)&st, 224, 0x5a);
+    tc_fill((uint8*)&st, (int64)sizeof(CrBlake2bState), 0x5a);
     tc_rc(label + " init rejects", cr_blake2b_init(&st, outlen, key, keylen), CR_E_ARG);
-    tc_ok(label + " rejected state wiped", tc_all_zero((uint8*)&st, 224));
+    tc_ok(label + " rejected state wiped", tc_all_zero((uint8*)&st, (int64)sizeof(CrBlake2bState)));
     return;
   }
   for k in 0..5 {
@@ -88,7 +88,7 @@ fn blake2b_row(label: string, msg: uint8*, n: int64, key: uint8*, keylen: int64,
     tc_rc(label + " final", cr_blake2b_final(&st, &d[0], outlen), CR_OK);
     tc_hex_eq(label + " piece {step}", &d[0], outlen, want);
     tc_ok(label + " no overrun", tc_all_zero(&d[0] + outlen, 64 - outlen));
-    tc_ok(label + " state wiped", tc_all_zero((uint8*)&st, 224));
+    tc_ok(label + " state wiped", tc_all_zero((uint8*)&st, (int64)sizeof(CrBlake2bState)));
   }
 }
 
@@ -109,7 +109,8 @@ fn errors() {
   tc_rc("sha256 final null st", cr_sha256_final(0, &d2), CR_E_ARG);
   tc_fill(&d2.b[0], 32, 0);
   tc_rc("sha256 final null out", cr_sha256_final(&s2, 0), CR_E_ARG);
-  tc_ok("sha256 null out: state wiped", tc_all_zero((uint8*)&s2, 112));
+  tc_ok("state sizes", sizeof(CrSha256State) == 112 && sizeof(CrSha512State) == 208 && sizeof(CrBlake2bState) == 224);
+  tc_ok("sha256 null out: state wiped", tc_all_zero((uint8*)&s2, (int64)sizeof(CrSha256State)));
   tc_ok("sha256 null out: out untouched", tc_all_zero(&d2.b[0], 32));
 
   // SHA-512
@@ -123,7 +124,7 @@ fn errors() {
   tc_rc("sha512 final null st", cr_sha512_final(0, &d5), CR_E_ARG);
   tc_fill(&d5.b[0], 64, 0);
   tc_rc("sha512 final null out", cr_sha512_final(&s5, 0), CR_E_ARG);
-  tc_ok("sha512 null out: state wiped", tc_all_zero((uint8*)&s5, 208));
+  tc_ok("sha512 null out: state wiped", tc_all_zero((uint8*)&s5, (int64)sizeof(CrSha512State)));
   tc_ok("sha512 null out: out untouched", tc_all_zero(&d5.b[0], 64));
 
   // BLAKE2b
@@ -142,17 +143,17 @@ fn errors() {
   tc_rc("blake2b final null st", cr_blake2b_final(0, &db[0], 32), CR_E_ARG);
   tc_fill(&db[0], 64, 0);
   tc_rc("blake2b final null out", cr_blake2b_final(&sb, 0, 32), CR_E_ARG);
-  tc_ok("blake2b null out: state wiped", tc_all_zero((uint8*)&sb, 224));
+  tc_ok("blake2b null out: state wiped", tc_all_zero((uint8*)&sb, (int64)sizeof(CrBlake2bState)));
 
   // A mismatched outlen at _final: E_ARG, state wiped, out untouched.
   tc_rc("blake2b init 2", cr_blake2b_init(&sb, 32, &key[0], 16), CR_OK);
   tc_rc("blake2b update 2", cr_blake2b_update(&sb, &m[0], 8), CR_OK);
   tc_rc("blake2b final outlen 31", cr_blake2b_final(&sb, &db[0], 31), CR_E_ARG);
-  tc_ok("blake2b mismatch: state wiped", tc_all_zero((uint8*)&sb, 224));
+  tc_ok("blake2b mismatch: state wiped", tc_all_zero((uint8*)&sb, (int64)sizeof(CrBlake2bState)));
   tc_ok("blake2b mismatch: out untouched", tc_all_zero(&db[0], 64));
   tc_rc("blake2b init 3", cr_blake2b_init(&sb, 32, 0, 0), CR_OK);
   tc_rc("blake2b final outlen 64", cr_blake2b_final(&sb, &db[0], 64), CR_E_ARG);
-  tc_ok("blake2b mismatch 64: state wiped", tc_all_zero((uint8*)&sb, 224));
+  tc_ok("blake2b mismatch 64: state wiped", tc_all_zero((uint8*)&sb, (int64)sizeof(CrBlake2bState)));
   tc_ok("blake2b mismatch 64: out untouched", tc_all_zero(&db[0], 64));
   // A failed init leaves a wiped state, so _final on it also fails.
   tc_rc("blake2b init bad", cr_blake2b_init(&sb, 8, 0, 0), CR_E_ARG);

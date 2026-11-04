@@ -106,16 +106,13 @@ export fn cr_blake2b(out: uint8*, outlen: int64, msg: uint8*, n: int64, key: uin
 
 // Sizes of the streaming states, for wiping them whole (no padding: all
 // fields are 8-byte aligned).
-const CR_HASH_SHA256_STATE: int64 = 112;
-const CR_HASH_SHA512_STATE: int64 = 208;
-const CR_HASH_BLAKE2B_STATE: int64 = 224;
 
 /// Streaming SHA-256 state. Treat as opaque: only cr_sha256_init, _update and
 /// _final touch it. The caller provides the memory.
 /// in: -
 /// returns: -
 /// owns: the caller owns the state; _final wipes it; to abandon a hash early
-///   wipe it with cr_wipe(st, 112)
+///   wipe it with cr_wipe((uint8*)st, (int64)sizeof(CrSha256State))
 /// thread: any thread (no shared state); one thread per state
 /// example: var st: CrSha256State; cr_sha256_init(&st);
 export struct CrSha256State {
@@ -127,7 +124,7 @@ export struct CrSha256State {
 /// in: -
 /// returns: -
 /// owns: the caller owns the state; _final wipes it; to abandon a hash early
-///   wipe it with cr_wipe(st, 208)
+///   wipe it with cr_wipe((uint8*)st, (int64)sizeof(CrSha512State))
 /// thread: any thread (no shared state); one thread per state
 /// example: var st: CrSha512State; cr_sha512_init(&st);
 export struct CrSha512State {
@@ -139,7 +136,7 @@ export struct CrSha512State {
 /// in: -
 /// returns: -
 /// owns: the caller owns the state; _final wipes it; to abandon a hash early
-///   wipe it with cr_wipe(st, 224). A keyed state holds the key: wipe or
+///   wipe it with cr_wipe((uint8*)st, (int64)sizeof(CrBlake2bState)). A keyed state holds the key: wipe or
 ///   finish it
 /// thread: any thread (no shared state); one thread per state
 /// example: var st: CrBlake2bState; cr_blake2b_init(&st, 32, 0, 0);
@@ -152,7 +149,7 @@ export struct CrBlake2bState {
 /// in: st writable state
 /// returns: CR_OK; CR_E_ARG (null st)
 /// owns: the caller owns st; _final wipes it, or abandon it with
-///   cr_wipe(st, 112)
+///   cr_wipe((uint8*)st, (int64)sizeof(CrSha256State))
 /// thread: any thread (no shared state)
 /// example: var st: CrSha256State; cr_sha256_init(&st);
 export fn cr_sha256_init(st: CrSha256State*) -> int32 {
@@ -187,7 +184,7 @@ export fn cr_sha256_update(st: CrSha256State*, msg: uint8*, n: int64) -> int32 {
 export fn cr_sha256_final(st: CrSha256State*, out: CrSha256*) -> int32 {
   if (st == 0) { return CR_E_ARG; }
   if (out == 0) {
-    cr_wipe((uint8*)st, CR_HASH_SHA256_STATE);
+    cr_wipe((uint8*)st, (int64)sizeof(CrSha256State));
     return CR_E_ARG;
   }
   crx_sha256_final(&st->s, &out->b[0]);
@@ -199,7 +196,7 @@ export fn cr_sha256_final(st: CrSha256State*, out: CrSha256*) -> int32 {
 /// in: st writable state
 /// returns: CR_OK; CR_E_ARG (null st)
 /// owns: the caller owns st; _final wipes it, or abandon it with
-///   cr_wipe(st, 208)
+///   cr_wipe((uint8*)st, (int64)sizeof(CrSha512State))
 /// thread: any thread (no shared state)
 /// example: var st: CrSha512State; cr_sha512_init(&st);
 export fn cr_sha512_init(st: CrSha512State*) -> int32 {
@@ -234,7 +231,7 @@ export fn cr_sha512_update(st: CrSha512State*, msg: uint8*, n: int64) -> int32 {
 export fn cr_sha512_final(st: CrSha512State*, out: CrSha512*) -> int32 {
   if (st == 0) { return CR_E_ARG; }
   if (out == 0) {
-    cr_wipe((uint8*)st, CR_HASH_SHA512_STATE);
+    cr_wipe((uint8*)st, (int64)sizeof(CrSha512State));
     return CR_E_ARG;
   }
   crx_sha512_final(&st->s, &out->b[0]);
@@ -248,7 +245,7 @@ export fn cr_sha512_final(st: CrSha512State*, out: CrSha512*) -> int32 {
 /// returns: CR_OK; CR_E_ARG (null st, outlen or keylen out of range, null key
 ///   with keylen > 0). On error st is wiped so a later _final fails too
 /// owns: the caller owns st and key (wipe the key yourself); st holds a copy
-///   of the key until _final wipes it, or abandon it with cr_wipe(st, 224)
+///   of the key until _final wipes it, or abandon it with cr_wipe((uint8*)st, (int64)sizeof(CrBlake2bState))
 /// thread: any thread (no shared state)
 /// example: var st: CrBlake2bState; cr_blake2b_init(&st, 32, 0, 0);
 export fn cr_blake2b_init(st: CrBlake2bState*, outlen: int64, key: uint8*, keylen: int64) -> int32 {
@@ -259,7 +256,7 @@ export fn cr_blake2b_init(st: CrBlake2bState*, outlen: int64, key: uint8*, keyle
     if (key == 0 || keylen < CR_BLAKE2B_KEY_MIN || keylen > CR_BLAKE2B_MAX) { bad = true; }
   }
   if (bad) {
-    cr_wipe((uint8*)st, CR_HASH_BLAKE2B_STATE);
+    cr_wipe((uint8*)st, (int64)sizeof(CrBlake2bState));
     return CR_E_ARG;
   }
   var kp: uint8* = 0;
@@ -295,7 +292,7 @@ export fn cr_blake2b_update(st: CrBlake2bState*, msg: uint8*, n: int64) -> int32
 export fn cr_blake2b_final(st: CrBlake2bState*, out: uint8*, outlen: int64) -> int32 {
   if (st == 0) { return CR_E_ARG; }
   if (out == 0 || outlen != st->s.outlen) {
-    cr_wipe((uint8*)st, CR_HASH_BLAKE2B_STATE);
+    cr_wipe((uint8*)st, (int64)sizeof(CrBlake2bState));
     return CR_E_ARG;
   }
   crx_blake2b_final(&st->s, out);
