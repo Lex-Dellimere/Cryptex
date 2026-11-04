@@ -11,7 +11,7 @@ No C, no shared libraries, no global state. Every function is safe on any thread
 
 ## Requirements
 
-- Linux x86-64.
+- Linux x86-64. Linux AArch64 builds too (not yet run on real hardware).
 - The Mettle compiler and a current mbuild (with `mbuild test`).
 
 ## Install
@@ -65,12 +65,13 @@ fn main() -> int32 {
 
 | Area | Functions | Standard |
 |---|---|---|
-| Random, compare, wipe | `cr_random_bytes`, `cr_equal`, `cr_wipe` | Linux `getrandom` |
-| Hashes | `cr_sha256`, `cr_sha512`, `cr_blake2b` | FIPS 180-4, RFC 7693 |
+| Random, compare, wipe | `cr_random_bytes`, `cr_equal`, `cr_is_zero`, `cr_wipe` | Linux `getrandom` |
+| Hashes | `cr_sha256`, `cr_sha512`, `cr_blake2b`, and `_init`/`_update`/`_final` to stream | FIPS 180-4, RFC 7693 |
 | MAC | `cr_hmac_sha256*`, `cr_hmac_sha512*` | RFC 2104 |
 | Key derivation | `cr_hkdf_sha256*` | RFC 5869 |
 | Passwords | `cr_pwhash_str`, `cr_pwhash_verify`, `cr_pwhash_needs_rehash` | Argon2id, RFC 9106 |
-| Encryption | `cr_aead_encrypt`, `cr_aead_decrypt` | XChaCha20-Poly1305 (RFC 8439 + draft-irtf-cfrg-xchacha) |
+| Encryption | `cr_aead_encrypt`, `cr_aead_decrypt` (random nonces) | XChaCha20-Poly1305 (RFC 8439 + draft-irtf-cfrg-xchacha) |
+| Encryption, counter nonces | `cr_chacha20poly1305_encrypt`, `_decrypt` | ChaCha20-Poly1305, RFC 8439 |
 | Key exchange | `cr_x25519_*`, `cr_kx_*` | X25519, RFC 7748 |
 | Signatures | `cr_ed25519_*` | Ed25519, RFC 8032 |
 | Encoding | `cr_hex_*`, `cr_base64url_*` | RFC 4648 |

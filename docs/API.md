@@ -448,7 +448,7 @@ var h: CrPwHash; cr_pwhash_str(&h, pw.chars, (int64)pw.length, CR_PW_INTERACTIVE
 
 ## core
 
-Initialization (a no-op), randomness, constant-time comparison and wiping. Pure Mettle: randomness comes from the Linux getrandom(2) system call through the syscall built-in; there is no foreign code and no shared state, so every function in this library may be called from any thread.
+Initialization (a no-op), randomness, constant-time comparison and wiping. Pure Mettle: randomness comes from the Linux getrandom(2) system call through the syscall built-in (Linux x86-64 and AArch64); there is no foreign code and no shared state, so every function in this library may be called from any thread.
 
 ### cr_init
 
@@ -532,6 +532,23 @@ Overwrites n bytes with zeros in a way the optimizer cannot remove (volatile sto
 
 ```mettle
 var k: CrKey32; cr_aead_keygen(&k); defer cr_wipe(&k.b[0], 32);
+```
+
+### cr_is_zero
+
+```mettle
+export fn cr_is_zero(buf: uint8*, n: int64) -> bool
+```
+
+Checks in constant time whether all n bytes are zero: the time depends on n only, never on the contents. Use it on secrets (for example to reject an all-zero shared secret) instead of a loop with an early exit.
+
+- **in:** buf readable for n bytes; n >= 0
+- **returns:** true only if all n bytes are zero (also for n == 0); false otherwise, and false for invalid arguments (null buf with n > 0, n < 0)
+- **owns:** nothing
+- **thread:** any thread (no shared state)
+
+```mettle
+if (cr_is_zero(&shared.b[0], 32)) { reject(); }
 ```
 
 ## hash
