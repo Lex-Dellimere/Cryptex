@@ -96,7 +96,8 @@ export fn cr_aead_encrypt(ct: uint8*, ct_cap: int64, ct_len: int64*, msg: uint8*
 ///   match (wrong key, nonce or ad, tampered or truncated ciphertext,
 ///   clen < 16); CR_E_ARG; CR_E_SPACE; CR_E_INIT. On every failure
 ///   *pt_len = 0 and the first pt_cap bytes of pt are wiped (sodium_memzero),
-///   so no unauthenticated plaintext ever reaches the caller
+///   so no unauthenticated plaintext ever reaches the caller (when
+///   decrypting in place, pt == ct, that also wipes the ciphertext)
 /// owns: nothing; the caller owns every buffer and must wipe the plaintext
 ///   when done
 /// thread: main thread only
