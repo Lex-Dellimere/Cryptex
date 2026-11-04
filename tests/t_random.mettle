@@ -1,3 +1,53 @@
+// randombytes sanity (not a statistical test), constant-time compare, wipe,
+// status names.
 import "crypto/crypto";
 import "tcheck";
-fn main() -> int32 { return tc_finish("random"); }
+
+fn main() -> int32 {
+  tc_rc("init", cr_init(), CR_OK);
+  tc_rc("init again (idempotent)", cr_init(), CR_OK);
+  var a: uint8[32];
+  var b: uint8[32];
+  tc_rc("random a", cr_random_bytes(&a[0], 32), CR_OK);
+  tc_rc("random b", cr_random_bytes(&b[0], 32), CR_OK);
+  tc_ok("random not all zero", !tc_all_zero(&a[0], 32));
+  tc_ok("two draws differ", !cr_equal(&a[0], &b[0], 32));
+  tc_rc("random zero length", cr_random_bytes(0, 0), CR_OK);
+  tc_rc("random null", cr_random_bytes(0, 4), CR_E_ARG);
+  tc_rc("random negative", cr_random_bytes(&a[0], -1), CR_E_ARG);
+
+  var seen: int32[10];
+  var in_range: bool = true;
+  for i in 0..2000 {
+    var v: uint32 = 99;
+    if (cr_random_u32_below(10, &v) != CR_OK || v >= 10) { in_range = false; } else { seen[v] = seen[v] + 1; }
+  }
+  tc_ok("u32_below in range", in_range);
+  var all_seen: bool = true;
+  for i in 0..10 { if (seen[i] == 0) { all_seen = false; } }
+  tc_ok("u32_below hits every value", all_seen);
+  var one: uint32 = 5;
+  tc_rc("u32_below(1)", cr_random_u32_below(1, &one), CR_OK);
+  tc_ok("u32_below(1) is 0", one == 0);
+  var z: uint32 = 0;
+  tc_rc("u32_below(0)", cr_random_u32_below(0, &z), CR_E_ARG);
+  tc_rc("u32_below null", cr_random_u32_below(10, 0), CR_E_ARG);
+
+  var c: uint8[32];
+  for i in 0..32 { c[i] = a[i]; }
+  tc_ok("equal same", cr_equal(&a[0], &c[0], 32));
+  c[31] = c[31] ^ 1;
+  tc_ok("equal last byte differs", !cr_equal(&a[0], &c[0], 32));
+  tc_ok("equal zero length", cr_equal(0, 0, 0));
+  tc_ok("equal null", !cr_equal(0, &c[0], 32));
+  tc_ok("equal negative", !cr_equal(&a[0], &c[0], -1));
+  tc_rc("wipe", cr_wipe(&a[0], 32), CR_OK);
+  tc_ok("wiped", tc_all_zero(&a[0], 32));
+  tc_rc("wipe null", cr_wipe(0, 4), CR_E_ARG);
+  var k: CrKey32;
+  tc_rc("random key", cr_random_bytes(&k.b[0], 32), CR_OK);
+  tc_rc("wipe key", cr_wipe(&k.b[0], 32), CR_OK);
+  tc_ok("key wiped", tc_all_zero(&k.b[0], 32));
+  tc_ok("status name", cr_status_name(CR_E_VERIFY) == "CR_E_VERIFY" && cr_status_name(42) == "CR_E_UNKNOWN");
+  return tc_finish("random");
+}

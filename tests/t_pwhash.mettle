@@ -1,3 +1,73 @@
+// Argon2id: hash, verify, wrong password, needs_rehash, text round trip,
+// malformed input.
+import "std/mem";
 import "crypto/crypto";
 import "tcheck";
-fn main() -> int32 { return tc_finish("pwhash"); }
+
+fn main() -> int32 {
+  var pw: string = "correct horse battery staple";
+  var bad: string = "correct horse battery stapl3";
+  var h: CrPwHash;
+  tc_rc("hash interactive", cr_pwhash_str(&h, pw.chars, (int64)pw.length, CR_PW_INTERACTIVE), CR_OK);
+  var text: string = cr_pwhash_text(&h);
+  tc_ok("argon2id prefix", text.length > 30 && text.chars[0] == 36 && text.chars[7] == 105 && text.chars[8] == 100);
+  var want_prefix: string = "$argon2id$v=19$m=65536,t=2,p=1$";
+  var pre_ok: bool = true;
+  for i in 0..want_prefix.length { if (text.chars[i] != want_prefix.chars[i]) { pre_ok = false; } }
+  tc_ok("interactive parameters in string", pre_ok);
+  tc_ok("verify ok", cr_pwhash_verify(&h, pw.chars, (int64)pw.length));
+  tc_ok("wrong password fails", !cr_pwhash_verify(&h, bad.chars, (int64)bad.length));
+  tc_ok("prefix of password fails", !cr_pwhash_verify(&h, pw.chars, (int64)pw.length - 1));
+  tc_ok("empty password fails", !cr_pwhash_verify(&h, 0, 0));
+  tc_ok("no rehash at same preset", !cr_pwhash_needs_rehash(&h, CR_PW_INTERACTIVE));
+  tc_ok("rehash for moderate", cr_pwhash_needs_rehash(&h, CR_PW_MODERATE));
+  tc_ok("rehash for sensitive", cr_pwhash_needs_rehash(&h, CR_PW_SENSITIVE));
+  tc_ok("rehash for unknown preset", cr_pwhash_needs_rehash(&h, 9));
+
+  var h2: CrPwHash;
+  tc_rc("hash again", cr_pwhash_str(&h2, pw.chars, (int64)pw.length, CR_PW_INTERACTIVE), CR_OK);
+  tc_ok("fresh salt each time", !cr_equal(&h.b[0], &h2.b[0], 128));
+
+  // Text round trip through storage.
+  var h3: CrPwHash;
+  tc_rc("from_text", cr_pwhash_from_text(&h3, text), CR_OK);
+  tc_ok("from_text verifies", cr_pwhash_verify(&h3, pw.chars, (int64)pw.length));
+  tc_rc("from_text empty", cr_pwhash_from_text(&h3, ""), CR_E_DECODE);
+  tc_rc("from_text wrong prefix", cr_pwhash_from_text(&h3, "$2b$12$abcdefghijklmnopqrstuv"), CR_E_DECODE);
+  tc_ok("rejected text leaves zeros", tc_all_zero(&h3.b[0], 128));
+  // Tampered hash text: change one character of the hash part.
+  var t2: CrPwHash;
+  cr_pwhash_from_text(&t2, text);
+  var last: int64 = (int64)text.length - 2;
+  if (t2.b[last] == 65) { t2.b[last] = 66; } else { t2.b[last] = 65; }
+  tc_ok("tampered hash fails", !cr_pwhash_verify(&t2, pw.chars, (int64)pw.length));
+  // Garbage and unterminated hashes fail closed.
+  var g: CrPwHash;
+  cr_pwhash_from_text(&g, "$argon2id$v=19$m=65536,t=2,p=1$garbage");
+  tc_ok("garbage fails", !cr_pwhash_verify(&g, pw.chars, (int64)pw.length));
+  tc_ok("garbage needs rehash", cr_pwhash_needs_rehash(&g, CR_PW_INTERACTIVE));
+  var u: CrPwHash;
+  tc_fill(&u.b[0], 128, 65);
+  tc_ok("unterminated fails", !cr_pwhash_verify(&u, pw.chars, (int64)pw.length));
+  tc_ok("unterminated text empty", cr_pwhash_text(&u).length == 0);
+  tc_rc("unknown preset", cr_pwhash_str(&h2, pw.chars, (int64)pw.length, 0), CR_E_ARG);
+  tc_ok("error leaves zeros", tc_all_zero(&h2.b[0], 128));
+  tc_rc("null password", cr_pwhash_str(&h2, 0, 4, CR_PW_INTERACTIVE), CR_E_ARG);
+
+  var ops: uint64 = 0;
+  var mem: uint64 = 0;
+  tc_rc("limits interactive", cr_pwhash_preset_limits(CR_PW_INTERACTIVE, &ops, &mem), CR_OK);
+  tc_ok("interactive = t2 m64MiB", ops == 2 && mem == 67108864);
+  tc_rc("limits moderate", cr_pwhash_preset_limits(CR_PW_MODERATE, &ops, &mem), CR_OK);
+  tc_ok("moderate = t3 m256MiB", ops == 3 && mem == 268435456);
+  tc_rc("limits sensitive", cr_pwhash_preset_limits(CR_PW_SENSITIVE, &ops, &mem), CR_OK);
+  tc_ok("sensitive = t4 m1GiB", ops == 4 && mem == 1073741824);
+
+  // Moderate preset round trip (256 MiB).
+  var hm: CrPwHash;
+  tc_rc("hash moderate", cr_pwhash_str(&hm, pw.chars, (int64)pw.length, CR_PW_MODERATE), CR_OK);
+  tc_ok("moderate verify", cr_pwhash_verify(&hm, pw.chars, (int64)pw.length));
+  tc_ok("moderate no rehash", !cr_pwhash_needs_rehash(&hm, CR_PW_MODERATE));
+  tc_ok("moderate rehash to interactive", cr_pwhash_needs_rehash(&hm, CR_PW_INTERACTIVE));
+  return tc_finish("pwhash");
+}

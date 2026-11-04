@@ -1,3 +1,63 @@
+// X25519: RFC 7748 section 5.2 vector 1 and the section 6.1 Alice/Bob
+// exchange; crypto_kx session keys mirror each other.
 import "crypto/crypto";
 import "tcheck";
-fn main() -> int32 { return tc_finish("kx"); }
+
+fn main() -> int32 {
+  var sk: CrX25519Secret;
+  var u: CrX25519Public;
+  var out: CrX25519Shared;
+  tc_unhex("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4", &sk.b[0], 32);
+  tc_unhex("e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c", &u.b[0], 32);
+  tc_rc("rfc7748 5.2 #1 rc", cr_x25519_shared(&out, &sk, &u), CR_OK);
+  tc_hex_eq("rfc7748 5.2 #1", &out.b[0], 32, "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552");
+
+  var a_sk: CrX25519Secret;
+  var b_sk: CrX25519Secret;
+  var a_pk: CrX25519Public;
+  var b_pk: CrX25519Public;
+  tc_unhex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a", &a_sk.b[0], 32);
+  tc_unhex("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb", &b_sk.b[0], 32);
+  tc_rc("alice pk rc", cr_x25519_public_from_secret(&a_pk, &a_sk), CR_OK);
+  tc_hex_eq("rfc7748 6.1 alice pk", &a_pk.b[0], 32, "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a");
+  tc_rc("bob pk rc", cr_x25519_public_from_secret(&b_pk, &b_sk), CR_OK);
+  tc_hex_eq("rfc7748 6.1 bob pk", &b_pk.b[0], 32, "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f");
+  var s1: CrX25519Shared;
+  var s2: CrX25519Shared;
+  tc_rc("alice shared rc", cr_x25519_shared(&s1, &a_sk, &b_pk), CR_OK);
+  tc_rc("bob shared rc", cr_x25519_shared(&s2, &b_sk, &a_pk), CR_OK);
+  tc_hex_eq("rfc7748 6.1 shared (alice)", &s1.b[0], 32, "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742");
+  tc_hex_eq("rfc7748 6.1 shared (bob)", &s2.b[0], 32, "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742");
+
+  // A low-order peer point (all zero) is refused and the output wiped.
+  var zero: CrX25519Public;
+  tc_fill(&out.b[0], 32, 7);
+  tc_rc("low-order point refused", cr_x25519_shared(&out, &a_sk, &zero), CR_E_KEY);
+  tc_ok("refused output wiped", tc_all_zero(&out.b[0], 32));
+
+  // Session keys.
+  var cpk: CrX25519Public;
+  var csk: CrX25519Secret;
+  var spk: CrX25519Public;
+  var ssk: CrX25519Secret;
+  tc_rc("client keypair", cr_x25519_keypair(&cpk, &csk), CR_OK);
+  tc_rc("server keypair", cr_x25519_keypair(&spk, &ssk), CR_OK);
+  var chk: CrX25519Public;
+  cr_x25519_public_from_secret(&chk, &csk);
+  tc_ok("keypair pk matches sk", cr_equal(&chk.b[0], &cpk.b[0], 32));
+  var crx: CrKey32;
+  var ctx: CrKey32;
+  var srx: CrKey32;
+  var stx: CrKey32;
+  tc_rc("client session", cr_kx_client_session_keys(&crx, &ctx, &cpk, &csk, &spk), CR_OK);
+  tc_rc("server session", cr_kx_server_session_keys(&srx, &stx, &spk, &ssk, &cpk), CR_OK);
+  tc_ok("client rx == server tx", cr_equal(&crx.b[0], &stx.b[0], 32));
+  tc_ok("client tx == server rx", cr_equal(&ctx.b[0], &srx.b[0], 32));
+  tc_ok("rx != tx", !cr_equal(&crx.b[0], &ctx.b[0], 32));
+  tc_rc("client session bad server pk", cr_kx_client_session_keys(&crx, &ctx, &cpk, &csk, &zero), CR_E_KEY);
+  tc_ok("bad session keys wiped", tc_all_zero(&crx.b[0], 32) && tc_all_zero(&ctx.b[0], 32));
+  tc_rc("null arg", cr_x25519_shared(0, &a_sk, &b_pk), CR_E_ARG);
+  cr_wipe(&csk.b[0], 32);
+  cr_wipe(&ssk.b[0], 32);
+  return tc_finish("kx");
+}

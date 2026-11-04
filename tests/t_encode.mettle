@@ -1,3 +1,99 @@
+// hex and base64url (RFC 4648 section 10 vectors, URL alphabet, no padding):
+// known values, round trips over every length 0..64, strict rejection.
+import "std/conv";
 import "crypto/crypto";
 import "tcheck";
-fn main() -> int32 { return tc_finish("encode"); }
+
+fn b64_is(label: string, raw: string, want: string) {
+  var out: uint8[128];
+  var n: int64 = 0;
+  tc_rc(label + " encode rc", cr_base64url_encode(&out[0], 128, &n, raw.chars, (int64)raw.length), CR_OK);
+  tc_ok(label + " encode", str_from_bytes((cstring)&out[0], n) == want && out[n] == 0);
+  tc_ok(label + " cap", cr_base64url_encoded_cap((int64)raw.length) == (int64)want.length + 1);
+  var back: uint8[128];
+  var bn: int64 = 0;
+  tc_rc(label + " decode rc", cr_base64url_decode(&back[0], 128, &bn, want.chars, (int64)want.length), CR_OK);
+  tc_ok(label + " decode", bn == (int64)raw.length && cr_equal(&back[0], raw.chars, bn));
+}
+
+fn b64_bad(label: string, text: string) {
+  var back: uint8[64];
+  tc_fill(&back[0], 64, 9);
+  var bn: int64 = 77;
+  tc_rc(label, cr_base64url_decode(&back[0], 64, &bn, text.chars, (int64)text.length), CR_E_DECODE);
+  tc_ok(label + " wiped", bn == 0 && tc_all_zero(&back[0], 64));
+}
+
+fn hex_bad(label: string, text: string) {
+  var back: uint8[64];
+  var bn: int64 = 77;
+  tc_rc(label, cr_hex_decode(&back[0], 64, &bn, text.chars, (int64)text.length), CR_E_DECODE);
+  tc_ok(label + " no length", bn == 0);
+}
+
+fn main() -> int32 {
+  // hex
+  var raw: uint8[4] = [0, 1, 171, 255];
+  var hx: uint8[16];
+  var hn: int64 = 0;
+  tc_rc("hex encode rc", cr_hex_encode(&hx[0], 9, &hn, &raw[0], 4), CR_OK);
+  tc_ok("hex encode", str_from_bytes((cstring)&hx[0], hn) == "0001abff" && hx[8] == 0);
+  tc_rc("hex encode space", cr_hex_encode(&hx[0], 8, &hn, &raw[0], 4), CR_E_SPACE);
+  tc_ok("hex space no length", hn == 0);
+  var up: string = "0001ABFF";
+  var back: uint8[8];
+  var bn: int64 = 0;
+  tc_rc("hex decode upper", cr_hex_decode(&back[0], 8, &bn, up.chars, 8), CR_OK);
+  tc_ok("hex decode value", bn == 4 && cr_equal(&back[0], &raw[0], 4));
+  tc_rc("hex decode space", cr_hex_decode(&back[0], 3, &bn, up.chars, 8), CR_E_SPACE);
+  tc_rc("hex decode empty", cr_hex_decode(&back[0], 8, &bn, 0, 0), CR_OK);
+  hex_bad("hex odd length", "abc");
+  hex_bad("hex bad digit", "0g");
+  hex_bad("hex leading space", " 00a");
+  hex_bad("hex inner space", "00 a");
+  hex_bad("hex colon", "00:a");
+  hex_bad("hex 0x prefix", "0x00");
+
+  // base64url, RFC 4648 section 10
+  b64_is("b64 empty", "", "");
+  b64_is("b64 f", "f", "Zg");
+  b64_is("b64 fo", "fo", "Zm8");
+  b64_is("b64 foo", "foo", "Zm9v");
+  b64_is("b64 foob", "foob", "Zm9vYg");
+  b64_is("b64 fooba", "fooba", "Zm9vYmE");
+  b64_is("b64 foobar", "foobar", "Zm9vYmFy");
+  // URL alphabet: 0xfb 0xff 0xbf -> "-_-_"
+  var u: uint8[3] = [251, 255, 191];
+  var t: uint8[8];
+  var tn: int64 = 0;
+  tc_rc("b64 url alphabet rc", cr_base64url_encode(&t[0], 8, &tn, &u[0], 3), CR_OK);
+  tc_ok("b64 url alphabet", str_from_bytes((cstring)&t[0], tn) == "-_-_");
+  tc_rc("b64 encode space", cr_base64url_encode(&t[0], 4, &tn, &u[0], 3), CR_E_SPACE);
+  b64_bad("b64 std alphabet +/", "+/+/");
+  b64_bad("b64 padding", "Zg==");
+  b64_bad("b64 4k+1 length", "Zm9vY");
+  b64_bad("b64 nonzero trailing bits", "Zh");
+  b64_bad("b64 space", "Zm9 v");
+  b64_bad("b64 newline", "Zm9v\n");
+  var sb: uint8[2];
+  var sn: int64 = 0;
+  var foo: string = "Zm9vYg";
+  tc_rc("b64 decode space", cr_base64url_decode(&sb[0], 2, &sn, foo.chars, 6), CR_E_SPACE);
+
+  // Round trips of random data, every length 0..64.
+  var all_ok: bool = true;
+  for n in 0..65 {
+    var src: uint8[64];
+    cr_random_bytes(&src[0], (int64)n);
+    var enc: uint8[160];
+    var en: int64 = 0;
+    var dec: uint8[64];
+    var dn: int64 = 0;
+    if (cr_hex_encode(&enc[0], 160, &en, &src[0], (int64)n) != CR_OK || en != (int64)n * 2) { all_ok = false; }
+    if (cr_hex_decode(&dec[0], 64, &dn, &enc[0], en) != CR_OK || dn != (int64)n || !cr_equal(&dec[0], &src[0], dn)) { all_ok = false; }
+    if (cr_base64url_encode(&enc[0], 160, &en, &src[0], (int64)n) != CR_OK || en + 1 != cr_base64url_encoded_cap((int64)n)) { all_ok = false; }
+    if (cr_base64url_decode(&dec[0], 64, &dn, &enc[0], en) != CR_OK || dn != (int64)n || !cr_equal(&dec[0], &src[0], dn)) { all_ok = false; }
+  }
+  tc_ok("round trips 0..64", all_ok);
+  return tc_finish("encode");
+}

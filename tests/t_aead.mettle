@@ -1,3 +1,83 @@
+// XChaCha20-Poly1305-IETF: draft-irtf-cfrg-xchacha-03 Appendix A.3.1, plus
+// fail-closed decryption (tampering, wrong ad/nonce/key, truncation,
+// capacity) and in-place round trips.
 import "crypto/crypto";
 import "tcheck";
-fn main() -> int32 { return tc_finish("aead"); }
+
+fn main() -> int32 {
+  var key: CrKey32;
+  var nonce: CrNonce24;
+  var ad: uint8[12];
+  tc_unhex("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f", &key.b[0], 32);
+  tc_unhex("404142434445464748494a4b4c4d4e4f5051525354555657", &nonce.b[0], 24);
+  tc_unhex("50515253c0c1c2c3c4c5c6c7", &ad[0], 12);
+  var pt: string = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
+  var mlen: int64 = (int64)pt.length;
+  var ct: uint8[160];
+  var clen: int64 = 0;
+  tc_rc("A.3.1 encrypt", cr_aead_encrypt(&ct[0], 160, &clen, pt.chars, mlen, &ad[0], 12, &nonce, &key), CR_OK);
+  tc_ok("A.3.1 length", clen == mlen + CR_AEAD_TAG_BYTES);
+  tc_hex_eq("A.3.1 ciphertext", &ct[0], mlen,
+    "bd6d179d3e83d43b9576579493c0e939572a1700252bfaccbed2902c21396cbb731c7f1b0b4aa6440bf3a82f4eda7e39ae64c6708c54c216cb96b72e1213b4522f8c9ba40db5d945b11b69b982c1bb9e3f3fac2bc369488f76b2383565d3fff921f9664c97637da9768812f615c68b13b52e");
+  tc_hex_eq("A.3.1 tag", &ct[mlen], 16, "c0875924c1c7987947deafd8780acf49");
+
+  var out: uint8[160];
+  var olen: int64 = 0;
+  tc_rc("A.3.1 decrypt", cr_aead_decrypt(&out[0], 160, &olen, &ct[0], clen, &ad[0], 12, &nonce, &key), CR_OK);
+  tc_ok("A.3.1 plaintext back", olen == mlen && cr_equal(&out[0], pt.chars, mlen));
+
+  // Fail closed: every failure gives CR_E_VERIFY, length 0, wiped output.
+  ct[5] = ct[5] ^ 1;
+  tc_fill(&out[0], 160, 255);
+  olen = 99;
+  tc_rc("tampered ciphertext", cr_aead_decrypt(&out[0], 160, &olen, &ct[0], clen, &ad[0], 12, &nonce, &key), CR_E_VERIFY);
+  tc_ok("tampered: no length", olen == 0);
+  tc_ok("tampered: output wiped", tc_all_zero(&out[0], 160));
+  ct[5] = ct[5] ^ 1;
+  ct[clen - 1] = ct[clen - 1] ^ 128;
+  tc_rc("tampered tag", cr_aead_decrypt(&out[0], 160, &olen, &ct[0], clen, &ad[0], 12, &nonce, &key), CR_E_VERIFY);
+  ct[clen - 1] = ct[clen - 1] ^ 128;
+  tc_rc("wrong ad", cr_aead_decrypt(&out[0], 160, &olen, &ct[0], clen, &ad[0], 11, &nonce, &key), CR_E_VERIFY);
+  tc_rc("missing ad", cr_aead_decrypt(&out[0], 160, &olen, &ct[0], clen, 0, 0, &nonce, &key), CR_E_VERIFY);
+  nonce.b[0] = nonce.b[0] ^ 1;
+  tc_rc("wrong nonce", cr_aead_decrypt(&out[0], 160, &olen, &ct[0], clen, &ad[0], 12, &nonce, &key), CR_E_VERIFY);
+  nonce.b[0] = nonce.b[0] ^ 1;
+  key.b[31] = key.b[31] ^ 1;
+  tc_rc("wrong key", cr_aead_decrypt(&out[0], 160, &olen, &ct[0], clen, &ad[0], 12, &nonce, &key), CR_E_VERIFY);
+  key.b[31] = key.b[31] ^ 1;
+  tc_rc("truncated", cr_aead_decrypt(&out[0], 160, &olen, &ct[0], clen - 1, &ad[0], 12, &nonce, &key), CR_E_VERIFY);
+  tc_rc("shorter than a tag", cr_aead_decrypt(&out[0], 160, &olen, &ct[0], 15, 0, 0, &nonce, &key), CR_E_VERIFY);
+  tc_rc("plaintext space", cr_aead_decrypt(&out[0], mlen - 1, &olen, &ct[0], clen, &ad[0], 12, &nonce, &key), CR_E_SPACE);
+  tc_rc("ciphertext space", cr_aead_encrypt(&out[0], mlen + 15, &olen, pt.chars, mlen, 0, 0, &nonce, &key), CR_E_SPACE);
+  tc_rc("null key", cr_aead_encrypt(&out[0], 160, &olen, pt.chars, mlen, 0, 0, &nonce, 0), CR_E_ARG);
+  tc_rc("neg ad len", cr_aead_encrypt(&out[0], 160, &olen, pt.chars, mlen, &ad[0], -1, &nonce, &key), CR_E_ARG);
+  tc_rc("decrypt still ok after failures", cr_aead_decrypt(&out[0], 160, &olen, &ct[0], clen, &ad[0], 12, &nonce, &key), CR_OK);
+
+  // Random key and nonce, in place, empty message.
+  var k2: CrKey32;
+  var n2: CrNonce24;
+  var n3: CrNonce24;
+  tc_rc("keygen", cr_aead_keygen(&k2), CR_OK);
+  tc_ok("keygen not zero", !tc_all_zero(&k2.b[0], 32));
+  tc_rc("nonce", cr_aead_nonce(&n2), CR_OK);
+  tc_rc("nonce 2", cr_aead_nonce(&n3), CR_OK);
+  tc_ok("nonces differ", !cr_equal(&n2.b[0], &n3.b[0], 24));
+  var buf: uint8[64];
+  for i in 0..40 { buf[i] = (uint8)(i * 3); }
+  var l2: int64 = 0;
+  tc_rc("in-place encrypt", cr_aead_encrypt(&buf[0], 64, &l2, &buf[0], 40, 0, 0, &n2, &k2), CR_OK);
+  var l3: int64 = 0;
+  tc_rc("in-place decrypt", cr_aead_decrypt(&buf[0], 64, &l3, &buf[0], l2, 0, 0, &n2, &k2), CR_OK);
+  var same: bool = l3 == 40;
+  for i in 0..40 { if (buf[i] != (uint8)(i * 3)) { same = false; } }
+  tc_ok("in-place round trip", same);
+  var e: uint8[16];
+  var el: int64 = 0;
+  tc_rc("empty encrypt", cr_aead_encrypt(&e[0], 16, &el, 0, 0, 0, 0, &n3, &k2), CR_OK);
+  var dl: int64 = 5;
+  var d: uint8[1];
+  tc_rc("empty decrypt", cr_aead_decrypt(&d[0], 0, &dl, &e[0], el, 0, 0, &n3, &k2), CR_OK);
+  tc_ok("empty length", el == 16 && dl == 0);
+  cr_wipe(&k2.b[0], 32);
+  return tc_finish("aead");
+}

@@ -1,3 +1,113 @@
+// HMAC-SHA256 / HMAC-SHA512: RFC 4231 test cases 1, 2, 3, 4, 6, 7 (keys of
+// 20, 4, 20, 25, 131 and 131 bytes), one-shot and streaming, plus verify.
 import "crypto/crypto";
 import "tcheck";
-fn main() -> int32 { return tc_finish("mac"); }
+
+struct TcMac {
+  key: uint8[131];
+  klen: int64;
+  data: uint8[160];
+  dlen: int64;
+}
+
+fn mac_case(c: TcMac*, label: string, want256: string, want512: string) {
+  var t: CrHmacSha256;
+  var u: CrHmacSha512;
+  tc_rc(label + " 256 rc", cr_hmac_sha256(&t, &c->key[0], c->klen, &c->data[0], c->dlen), CR_OK);
+  tc_hex_eq(label + " 256", &t.b[0], 32, want256);
+  tc_rc(label + " 512 rc", cr_hmac_sha512(&u, &c->key[0], c->klen, &c->data[0], c->dlen), CR_OK);
+  tc_hex_eq(label + " 512", &u.b[0], 64, want512);
+  tc_ok(label + " 256 verify", cr_hmac_sha256_verify(&t, &c->key[0], c->klen, &c->data[0], c->dlen));
+  tc_ok(label + " 512 verify", cr_hmac_sha512_verify(&u, &c->key[0], c->klen, &c->data[0], c->dlen));
+  // Streaming, split in two uneven parts.
+  var h: int64 = c->dlen / 3;
+  var st: CrHmacSha256State;
+  tc_rc(label + " 256 init", cr_hmac_sha256_init(&st, &c->key[0], c->klen), CR_OK);
+  tc_rc(label + " 256 upd1", cr_hmac_sha256_update(&st, &c->data[0], h), CR_OK);
+  tc_rc(label + " 256 upd2", cr_hmac_sha256_update(&st, &c->data[h], c->dlen - h), CR_OK);
+  var t2: CrHmacSha256;
+  tc_rc(label + " 256 final", cr_hmac_sha256_final(&st, &t2), CR_OK);
+  tc_hex_eq(label + " 256 streamed", &t2.b[0], 32, want256);
+  tc_ok(label + " 256 state wiped", tc_all_zero(cr_hmac_sha256_state_bytes(&st), 256));
+  var su: CrHmacSha512State;
+  tc_rc(label + " 512 init", cr_hmac_sha512_init(&su, &c->key[0], c->klen), CR_OK);
+  tc_rc(label + " 512 upd1", cr_hmac_sha512_update(&su, &c->data[0], h), CR_OK);
+  tc_rc(label + " 512 upd2", cr_hmac_sha512_update(&su, &c->data[h], c->dlen - h), CR_OK);
+  var u2: CrHmacSha512;
+  tc_rc(label + " 512 final", cr_hmac_sha512_final(&su, &u2), CR_OK);
+  tc_hex_eq(label + " 512 streamed", &u2.b[0], 64, want512);
+  tc_ok(label + " 512 state wiped", tc_all_zero(cr_hmac_sha512_state_bytes(&su), 512));
+  // A one-bit change in the tag, the key or the data must fail.
+  t.b[31] = t.b[31] ^ 1;
+  tc_ok(label + " 256 bad tag rejected", !cr_hmac_sha256_verify(&t, &c->key[0], c->klen, &c->data[0], c->dlen));
+  u.b[0] = u.b[0] ^ 128;
+  tc_ok(label + " 512 bad tag rejected", !cr_hmac_sha512_verify(&u, &c->key[0], c->klen, &c->data[0], c->dlen));
+  c->data[0] = c->data[0] ^ 1;
+  tc_ok(label + " 256 bad data rejected", !cr_hmac_sha256_verify(&t2, &c->key[0], c->klen, &c->data[0], c->dlen));
+  c->data[0] = c->data[0] ^ 1;
+  c->key[0] = c->key[0] ^ 1;
+  tc_ok(label + " 512 bad key rejected", !cr_hmac_sha512_verify(&u2, &c->key[0], c->klen, &c->data[0], c->dlen));
+  c->key[0] = c->key[0] ^ 1;
+}
+
+fn set_str(dst: uint8*, s: string) -> int64 {
+  var i: int64 = 0;
+  while (i < (int64)s.length) {
+    dst[i] = s.chars[i];
+    i = i + 1;
+  }
+  return (int64)s.length;
+}
+
+fn main() -> int32 {
+  var c: TcMac;
+  tc_fill(&c.key[0], 20, 11);
+  c.klen = 20;
+  c.dlen = set_str(&c.data[0], "Hi There");
+  mac_case(&c, "rfc4231 #1",
+    "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+    "87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cdedaa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854");
+
+  c.klen = set_str(&c.key[0], "Jefe");
+  c.dlen = set_str(&c.data[0], "what do ya want for nothing?");
+  mac_case(&c, "rfc4231 #2",
+    "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
+    "164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737");
+
+  tc_fill(&c.key[0], 20, 170);
+  c.klen = 20;
+  tc_fill(&c.data[0], 50, 221);
+  c.dlen = 50;
+  mac_case(&c, "rfc4231 #3",
+    "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe",
+    "fa73b0089d56a284efb0f0756c890be9b1b5dbdd8ee81a3655f83e33b2279d39bf3e848279a722c806b485a47e67c807b946a337bee8942674278859e13292fb");
+
+  for i in 0..25 { c.key[i] = (uint8)(i + 1); }
+  c.klen = 25;
+  tc_fill(&c.data[0], 50, 205);
+  c.dlen = 50;
+  mac_case(&c, "rfc4231 #4",
+    "82558a389a443c0ea4cc819899f2083a85f0faa3e578f8077a2e3ff46729665b",
+    "b0ba465637458c6990e5a8c5f61d4af7e576d97ff94b872de76f8050361ee3dba91ca5c11aa25eb4d679275cc5788063a5f19741120c4f2de2adebeb10a298dd");
+
+  tc_fill(&c.key[0], 131, 170);
+  c.klen = 131;
+  c.dlen = set_str(&c.data[0], "Test Using Larger Than Block-Size Key - Hash Key First");
+  mac_case(&c, "rfc4231 #6",
+    "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54",
+    "80b24263c7c1a3ebb71493c1dd7be8b49b46d1f41b4aeec1121b013783f8f3526b56d037e05f2598bd0fd2215d6a1e5295e64f73f63f0aec8b915a985d786598");
+
+  c.dlen = set_str(&c.data[0], "This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm.");
+  mac_case(&c, "rfc4231 #7",
+    "9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2",
+    "e37b6a775dc87dbaa4dfa9f96e5e3ffddebd71f8867289865df5a32d20cdc944b6022cac3c4982b10d5eeb55c3e4de15134676fb6de0446065c97440fa8c6a58");
+
+  var t: CrHmacSha256;
+  tc_rc("hmac null out", cr_hmac_sha256(0, &c.key[0], 4, &c.data[0], 4), CR_E_ARG);
+  tc_rc("hmac null key", cr_hmac_sha256(&t, 0, 4, &c.data[0], 4), CR_E_ARG);
+  tc_rc("hmac neg keylen", cr_hmac_sha256(&t, &c.key[0], -1, &c.data[0], 4), CR_E_ARG);
+  tc_rc("hmac neg len", cr_hmac_sha512(0, &c.key[0], 4, &c.data[0], -4), CR_E_ARG);
+  tc_ok("hmac verify null tag", !cr_hmac_sha256_verify(0, &c.key[0], 4, &c.data[0], 4));
+  tc_rc("hmac empty key ok", cr_hmac_sha256(&t, 0, 0, &c.data[0], 4), CR_OK);
+  return tc_finish("mac");
+}

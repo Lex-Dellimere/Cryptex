@@ -18,3 +18,57 @@ fn project() {
 
 fn deps() {
 }
+
+// test-programs: build the test package (tests/) and the minimal dependent
+// (tests/dependent/) with mbuild in debug and release, then run every
+// suite. Each suite prints one "OK <suite>" line.
+//
+// The suites call libsodium, which the `mbuild test` interpreter cannot do,
+// so they are built programs. Both directories are packages that depend on
+// crypto by path, so building them also proves the link declaration above
+// reaches dependents.
+//   mbuild test-programs              both profiles
+//   mbuild test-programs --debug      debug only
+//   mbuild test-programs --release    release only
+fn cmd_test_programs(a: MbArgs*) -> int32 {
+  var mbuild: string = mb_env("MBUILD_EXE");
+  if (mbuild == "") { mbuild = "mbuild"; }
+  var suites: string[8] = ["t_hash", "t_mac", "t_pwhash", "t_aead", "t_kx", "t_sign", "t_encode", "t_random"];
+  var profiles: string[2] = ["debug", "release"];
+  var failed: int32 = 0;
+  for pi in 0..2 {
+    var prof: string = profiles[pi];
+    if (prof == "debug" && mb_flag(a, "--release")) { continue; }
+    if (prof == "release" && mb_flag(a, "--debug")) { continue; }
+    mb_say("== " + prof);
+    var dirs: string[2] = ["tests", "tests/dependent"];
+    for di in 0..2 {
+      var b: MbCmd* = mb_cmd(mbuild);
+      mb_cmd_arg(b, "build");
+      if (prof == "release") { mb_cmd_arg(b, "-r"); }
+      mb_cmd_cwd(b, mb_root() + "/" + dirs[di]);
+      if (mb_cmd_run(b) != 0) {
+        mb_warn(dirs[di] + " does not build (" + prof + ")");
+        failed = failed + 1;
+      }
+    }
+    for i in 0..8 {
+      var r: MbCmd* = mb_cmd(mb_root() + "/tests/build/linux/" + prof + "/" + suites[i]);
+      if (mb_cmd_run(r) != 0) {
+        mb_warn(suites[i] + " failed (" + prof + ")");
+        failed = failed + 1;
+      }
+    }
+    var dr: MbCmd* = mb_cmd(mb_root() + "/tests/dependent/build/linux/" + prof + "/crypto_dependent");
+    if (mb_cmd_run(dr) != 0) {
+      mb_warn("tests/dependent failed (" + prof + ")");
+      failed = failed + 1;
+    }
+  }
+  if (failed > 0) {
+    mb_say("test-programs: FAILED ({failed})");
+    return 1;
+  }
+  mb_say("test-programs: ok");
+  return 0;
+}
