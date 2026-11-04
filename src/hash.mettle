@@ -32,7 +32,7 @@ export const CR_BLAKE2B_MAX: int64 = 64;
 /// example: cr_blake2b(&o[0], 32, m, n, &k[0], CR_BLAKE2B_KEY_MIN);
 export const CR_BLAKE2B_KEY_MIN: int64 = 16;
 
-// A valid address for zero-length inputs, so libsodium never sees a null
+// A valid address for zero-length inputs, so the hash code never sees a null
 // pointer.
 var g_cr_hash_empty: uint8[1];
 
@@ -43,14 +43,13 @@ fn cr_hash_in(p: uint8*, n: int64) -> uint8* {
 
 /// Computes SHA-256 of n bytes (FIPS 180-4).
 /// in: out; msg readable for n bytes (may be 0 when n == 0); n >= 0
-/// returns: CR_OK; CR_E_ARG (null out, null msg with n > 0, n < 0);
-///   CR_E_INIT. On error out is not written
+/// returns: CR_OK; CR_E_ARG (null out, null msg with n > 0, n < 0). On error
+///   out is not written
 /// owns: nothing; the caller owns out and msg
 /// thread: any thread (no shared state)
 /// example: var d: CrSha256; cr_sha256(&d, s.chars, (int64)s.length);
 export fn cr_sha256(out: CrSha256*, msg: uint8*, n: int64) -> int32 {
   if (out == 0 || n < 0 || (msg == 0 && n > 0)) { return CR_E_ARG; }
-  if (cr_init() != CR_OK) { return CR_E_INIT; }
   var s: CrxSha256;
   crx_sha256_init(&s);
   crx_sha256_update(&s, msg, n);
@@ -60,14 +59,13 @@ export fn cr_sha256(out: CrSha256*, msg: uint8*, n: int64) -> int32 {
 
 /// Computes SHA-512 of n bytes (FIPS 180-4).
 /// in: out; msg readable for n bytes (may be 0 when n == 0); n >= 0
-/// returns: CR_OK; CR_E_ARG (null out, null msg with n > 0, n < 0);
-///   CR_E_INIT. On error out is not written
+/// returns: CR_OK; CR_E_ARG (null out, null msg with n > 0, n < 0). On error
+///   out is not written
 /// owns: nothing; the caller owns out and msg
 /// thread: any thread (no shared state)
 /// example: var d: CrSha512; cr_sha512(&d, s.chars, (int64)s.length);
 export fn cr_sha512(out: CrSha512*, msg: uint8*, n: int64) -> int32 {
   if (out == 0 || n < 0 || (msg == 0 && n > 0)) { return CR_E_ARG; }
-  if (cr_init() != CR_OK) { return CR_E_INIT; }
   var s: CrxSha512;
   crx_sha512_init(&s);
   crx_sha512_update(&s, msg, n);

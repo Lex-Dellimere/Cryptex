@@ -7,12 +7,12 @@
 /// thread: constant
 /// example: if (cr_sha256(&d, p, n) != CR_OK) { ... }
 export const CR_OK: int32 = 0;
-/// CR_E_INIT: libsodium could not be initialized (sodium_init failed).
+/// CR_E_INIT: never returned; kept so existing code that names it still compiles.
 /// in: -
 /// returns: -1
 /// owns: nothing
 /// thread: constant
-/// example: if (cr_init() == CR_E_INIT) { abort(); }
+/// example: if (cr_init() == CR_E_INIT) { abort(); }  // never true
 export const CR_E_INIT: int32 = -1;
 /// CR_E_ARG: an argument is invalid (null pointer with a non-zero length,
 /// negative length, length outside the primitive's allowed range).
@@ -43,8 +43,8 @@ export const CR_E_VERIFY: int32 = -4;
 /// thread: constant
 /// example: cr_hex_decode(&b[0], 4, &n, "zz", 2) == CR_E_DECODE
 export const CR_E_DECODE: int32 = -5;
-/// CR_E_INTERNAL: libsodium reported a failure that is not the caller's
-/// fault (for example Argon2id could not allocate its memory).
+/// CR_E_INTERNAL: an internal failure that is not the caller's fault (the
+/// kernel random source failed, or memory for Argon2id could not be mapped).
 /// in: -
 /// returns: -6
 /// owns: nothing

@@ -1,0 +1,127 @@
+// HKDF-SHA256: RFC 5869 Appendix A test cases 1, 2 and 3, every row of
+// tests/vec_hkdf.mettle (extract, expand and one-shot), and argument errors.
+import "crypto/status";
+import "crypto/core";
+import "crypto/kdf";
+import "tcheck";
+import "vec_hkdf";
+
+// Checks extract, expand and the one-shot call against known PRK and OKM.
+fn kdf_case(label: string, salt: uint8*, saltlen: int64, ikm: uint8*, ikmlen: int64,
+            info: uint8*, infolen: int64, outlen: int64, wantprk: string, wantokm: string) {
+  var prk: uint8[32];
+  var okm: uint8[8160];
+  tc_rc(label + " extract rc", cr_hkdf_sha256_extract(&prk[0], salt, saltlen, ikm, ikmlen), CR_OK);
+  tc_hex_eq(label + " prk", &prk[0], 32, wantprk);
+  tc_rc(label + " expand rc", cr_hkdf_sha256_expand(&okm[0], outlen, &prk[0], 32, info, infolen), CR_OK);
+  tc_hex_eq(label + " okm", &okm[0], outlen, wantokm);
+  cr_wipe(&okm[0], 8160);
+  tc_rc(label + " one-shot rc", cr_hkdf_sha256(&okm[0], outlen, salt, saltlen, ikm, ikmlen, info, infolen), CR_OK);
+  tc_hex_eq(label + " one-shot okm", &okm[0], outlen, wantokm);
+}
+
+// Parses an unpadded lowercase hex number.
+fn parse_hex_int(s: string) -> int64 {
+  var v: int64 = 0;
+  var i: int64 = 0;
+  while (i < (int64)s.length) {
+    var c: int32 = (int32)s.chars[i];
+    var d: int32 = c - 48;
+    if (c >= 97) { d = c - 97 + 10; }
+    v = v * 16 + (int64)d;
+    i = i + 1;
+  }
+  return v;
+}
+
+fn main() -> int32 {
+  var ikm: uint8[512];
+  var salt: uint8[512];
+  var info: uint8[512];
+  var n1: int64 = 0;
+  var n2: int64 = 0;
+  var n3: int64 = 0;
+
+  // RFC 5869 A.1: basic test case with SHA-256.
+  n1 = tc_unhex("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b", &ikm[0], 512);
+  n2 = tc_unhex("000102030405060708090a0b0c", &salt[0], 512);
+  n3 = tc_unhex("f0f1f2f3f4f5f6f7f8f9", &info[0], 512);
+  kdf_case("rfc5869 A.1", &salt[0], n2, &ikm[0], n1, &info[0], n3, 42,
+    "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5",
+    "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865");
+
+  // RFC 5869 A.2: longer inputs and outputs.
+  n1 = tc_unhex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f", &ikm[0], 512);
+  n2 = tc_unhex("606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeaf", &salt[0], 512);
+  n3 = tc_unhex("b0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff", &info[0], 512);
+  kdf_case("rfc5869 A.2", &salt[0], n2, &ikm[0], n1, &info[0], n3, 82,
+    "06a6b88c5853361a06104c9ceb35b45cef760014904671014a193f40c15fc244",
+    "b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c59045a99cac7827271cb41c65e590e09da3275600c2f09b8367793a9aca3db71cc30c58179ec3e87c14c01d5c1f3434f1d87");
+
+  // RFC 5869 A.3: zero-length salt and info.
+  n1 = tc_unhex("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b", &ikm[0], 512);
+  kdf_case("rfc5869 A.3", &salt[0], 0, &ikm[0], n1, &info[0], 0, 42,
+    "19ef24a32c717b167f33a91d6f648bdf96596776afdb6377ac434c1c293ccb04",
+    "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8");
+  // Same with null pointers for the empty salt and info.
+  kdf_case("rfc5869 A.3 null", 0, 0, &ikm[0], n1, 0, 0, 42,
+    "19ef24a32c717b167f33a91d6f648bdf96596776afdb6377ac434c1c293ccb04",
+    "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8");
+
+  // Every generated row: salt|ikm|info|outlen (hex)|prk|okm.
+  for r in 0..VEC_HKDF_N {
+    var row: string = VEC_HKDF[r];
+    var label: string = "row {r}";
+    var sl: int64 = tc_unhex(tc_field(row, 0), &salt[0], 512);
+    var il: int64 = tc_unhex(tc_field(row, 1), &ikm[0], 512);
+    var nl: int64 = tc_unhex(tc_field(row, 2), &info[0], 512);
+    tc_ok(label + " decoded", sl >= 0 && il >= 0 && nl >= 0);
+    var outlen: int64 = parse_hex_int(tc_field(row, 3));
+    var wantokm: string = tc_field(row, 5);
+    tc_ok(label + " outlen", outlen >= 1 && outlen <= CR_HKDF_SHA256_MAX && (int64)wantokm.length == outlen * 2);
+    kdf_case(label, &salt[0], sl, &ikm[0], il, &info[0], nl, outlen, tc_field(row, 4), wantokm);
+  }
+
+  // Errors.
+  var prk: uint8[32];
+  var out: uint8[64];
+  tc_fill(&prk[0], 32, 5);
+  tc_fill(&ikm[0], 32, 9);
+  tc_fill(&out[0], 64, 7);
+  tc_rc("expand outlen 0", cr_hkdf_sha256_expand(&out[0], 0, &prk[0], 32, &info[0], 4), CR_E_ARG);
+  tc_rc("expand outlen 8161", cr_hkdf_sha256_expand(&out[0], 8161, &prk[0], 32, &info[0], 4), CR_E_ARG);
+  tc_rc("expand outlen negative", cr_hkdf_sha256_expand(&out[0], -1, &prk[0], 32, &info[0], 4), CR_E_ARG);
+  tc_rc("expand prklen 31", cr_hkdf_sha256_expand(&out[0], 64, &prk[0], 31, &info[0], 4), CR_E_ARG);
+  tc_ok("expand prklen 31 wipes out", tc_all_zero(&out[0], 64));
+  tc_fill(&out[0], 64, 7);
+  tc_rc("expand null prk", cr_hkdf_sha256_expand(&out[0], 64, 0, 32, &info[0], 4), CR_E_ARG);
+  tc_ok("expand null prk wipes out", tc_all_zero(&out[0], 64));
+  tc_fill(&out[0], 64, 7);
+  tc_rc("expand null info", cr_hkdf_sha256_expand(&out[0], 64, &prk[0], 32, 0, 4), CR_E_ARG);
+  tc_rc("expand negative infolen", cr_hkdf_sha256_expand(&out[0], 64, &prk[0], 32, &info[0], -1), CR_E_ARG);
+  tc_rc("expand null out", cr_hkdf_sha256_expand(0, 64, &prk[0], 32, &info[0], 4), CR_E_ARG);
+  tc_rc("expand ok after errors", cr_hkdf_sha256_expand(&out[0], 64, &prk[0], 32, &info[0], 4), CR_OK);
+  tc_ok("expand wrote output", !tc_all_zero(&out[0], 64));
+
+  tc_fill(&out[0], 64, 7);
+  tc_rc("one-shot outlen 0", cr_hkdf_sha256(&out[0], 0, &salt[0], 4, &ikm[0], 32, &info[0], 4), CR_E_ARG);
+  tc_rc("one-shot outlen 8161", cr_hkdf_sha256(&out[0], 8161, &salt[0], 4, &ikm[0], 32, &info[0], 4), CR_E_ARG);
+  tc_rc("one-shot null out", cr_hkdf_sha256(0, 64, &salt[0], 4, &ikm[0], 32, &info[0], 4), CR_E_ARG);
+  tc_rc("one-shot null ikm", cr_hkdf_sha256(&out[0], 64, &salt[0], 4, 0, 32, &info[0], 4), CR_E_ARG);
+  tc_ok("one-shot null ikm wipes out", tc_all_zero(&out[0], 64));
+  tc_fill(&out[0], 64, 7);
+  tc_rc("one-shot null salt", cr_hkdf_sha256(&out[0], 64, 0, 4, &ikm[0], 32, &info[0], 4), CR_E_ARG);
+  tc_rc("one-shot negative saltlen", cr_hkdf_sha256(&out[0], 64, &salt[0], -1, &ikm[0], 32, &info[0], 4), CR_E_ARG);
+  tc_rc("one-shot null info", cr_hkdf_sha256(&out[0], 64, &salt[0], 4, &ikm[0], 32, 0, 4), CR_E_ARG);
+
+  tc_rc("extract null prk", cr_hkdf_sha256_extract(0, &salt[0], 4, &ikm[0], 32), CR_E_ARG);
+  tc_fill(&prk[0], 32, 5);
+  tc_rc("extract null ikm", cr_hkdf_sha256_extract(&prk[0], &salt[0], 4, 0, 32), CR_E_ARG);
+  tc_ok("extract error wipes prk", tc_all_zero(&prk[0], 32));
+  tc_rc("extract null salt", cr_hkdf_sha256_extract(&prk[0], 0, 4, &ikm[0], 32), CR_E_ARG);
+  tc_rc("extract negative ikmlen", cr_hkdf_sha256_extract(&prk[0], &salt[0], 4, &ikm[0], -1), CR_E_ARG);
+  tc_rc("extract negative saltlen", cr_hkdf_sha256_extract(&prk[0], &salt[0], -1, &ikm[0], 32), CR_E_ARG);
+  tc_rc("extract empty ok", cr_hkdf_sha256_extract(&prk[0], 0, 0, 0, 0), CR_OK);
+  tc_hex_eq("extract empty is hmac of nothing", &prk[0], 32, "b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad");
+  return tc_finish("kdf");
+}

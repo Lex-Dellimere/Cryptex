@@ -1,4 +1,5 @@
-// Machine tokens and human codes. They look alike (random characters from an
+// Machine tokens and human codes, pure Mettle (SHA-256 per FIPS 180-4 and
+// HMAC-SHA256 per RFC 2104). They look alike (random characters from an
 // alphabet) but they are different things and are stored differently.
 //
 // WHY two kinds. A machine token (API key, session id, reset link) is long and
@@ -15,7 +16,7 @@
 // Tokens use base62 or Crockford base32. There is deliberately no base64url
 // alphabet: its '-' and '_' make the boundary of a "prefix_" ambiguous and
 // break double-click selection. Characters are drawn uniformly with
-// cr_random_u32_below (libsodium randombytes_uniform, unbiased). Entropy per
+// cr_random_u32_below (unbiased). Entropy per
 // character is log2(62) = 5.954 bits (base62) and 5 bits (base32); see
 // cr_token_bits.
 //
@@ -136,10 +137,10 @@ fn cr_tok_nchars_ok(alphabet: int32, nchars: int64) -> bool {
 /// returns: CR_OK and *out_len = prefix.length + nchars (the nul is not
 ///   counted); CR_E_ARG (null out or out_len, bad prefix, unknown alphabet,
 ///   nchars too small for 128 bits or above 256); CR_E_SPACE if out_cap is
-///   too small (nothing written); CR_E_INIT. If the random source fails, out
-///   (out_cap bytes) is wiped and its code is returned. On error *out_len = 0
+///   too small (nothing written); CR_E_INTERNAL if the kernel random source
+///   fails (out, out_cap bytes, is wiped). On error *out_len = 0
 /// owns: nothing; the caller owns out
-/// thread: main thread only
+/// thread: any thread (no shared state)
 /// example: var t: uint8[64]; var n: int64; cr_token_new(&t[0], 64, &n, "mtlr_", CR_TOKEN_BASE62, 40);  // registry API token
 export fn cr_token_new(out: uint8*, out_cap: int64, out_len: int64*, prefix: string, alphabet: int32, nchars: int64) -> int32 {
   if (out_len == 0) { return CR_E_ARG; }
@@ -224,10 +225,9 @@ export fn cr_token_bits(alphabet: int32, nchars: int64) -> int64 {
 /// way: store them with cr_code_hash instead, because a leaked SHA-256 of a
 /// ~50-bit code is brute-forceable.
 /// in: out; tok, the token text
-/// returns: CR_OK; CR_E_ARG for a null out; otherwise cr_sha256's result
-///   (CR_E_INIT). On error out is not written
+/// returns: CR_OK; CR_E_ARG for a null out. On error out is not written
 /// owns: nothing; the caller owns out
-/// thread: main thread only
+/// thread: any thread (no shared state)
 /// example: var d: CrSha256; cr_token_hash(&d, tok);  // store d, not tok
 export fn cr_token_hash(out: CrSha256*, tok: string) -> int32 {
   if (out == 0) { return CR_E_ARG; }
@@ -246,10 +246,10 @@ export fn cr_token_hash(out: CrSha256*, tok: string) -> int32 {
 /// returns: CR_OK and *out_len = total (the nul is not counted); CR_E_ARG
 ///   (null out or out_len, nchars outside 8..32, group < 0, group == 1,
 ///   group > 16); CR_E_SPACE if out_cap < total + 1 (nothing written);
-///   CR_E_INIT. If the random source fails, out (out_cap bytes) is wiped and
-///   its code is returned. On error *out_len = 0
+///   CR_E_INTERNAL if the kernel random source fails (out, out_cap bytes, is
+///   wiped). On error *out_len = 0
 /// owns: nothing; the caller owns out and must cr_wipe it when done
-/// thread: main thread only
+/// thread: any thread (no shared state)
 /// example: var c: uint8[16]; var n: int64; cr_code_new(&c[0], 16, &n, 10, 5);  // "k3f9a-7mx2q"
 export fn cr_code_new(out: uint8*, out_cap: int64, out_len: int64*, nchars: int64, group: int64) -> int32 {
   if (out_len == 0) { return CR_E_ARG; }
@@ -300,8 +300,7 @@ fn cr_code_canon(c0: uint8) -> int32 {
 /// Turns what a person typed into the canonical code: skips '-' and ' ',
 /// turns ASCII A-Z into lowercase, then reads i and l as 1 and o as 0 (the
 /// Crockford rules); every other byte, u included, must be in the alphabet
-/// "0123456789abcdefghjkmnpqrstvwxyz". The result is followed by a nul. It
-/// makes no libsodium call except cr_wipe.
+/// "0123456789abcdefghjkmnpqrstvwxyz". The result is followed by a nul.
 /// in: out writable for out_cap >= normalized length + 1 bytes; out_len;
 ///   input, the typed text
 /// returns: CR_OK and *out_len = the normalized length (8..32, the nul is not
@@ -310,7 +309,7 @@ fn cr_code_canon(c0: uint8) -> int32 {
 ///   normalized length + 1 > out_cap. On CR_E_DECODE and CR_E_SPACE out
 ///   (out_cap bytes) is wiped; on every error *out_len = 0
 /// owns: nothing; the caller owns out (a code is a secret, wipe it when done)
-/// thread: main thread only (cr_wipe)
+/// thread: any thread (no shared state)
 /// example: var c: uint8[40]; var n: int64; cr_code_normalize(&c[0], 40, &n, "ABCDE-I2345");  // "abcde12345"
 export fn cr_code_normalize(out: uint8*, out_cap: int64, out_len: int64*, input: string) -> int32 {
   if (out_len == 0) { return CR_E_ARG; }
@@ -364,11 +363,10 @@ export fn cr_code_normalize(out: uint8*, out_cap: int64, out_len: int64*, input:
 /// more characters are recommended (50 bits).
 /// in: out; pepper, the 32-byte server secret; code, the code as typed
 /// returns: CR_OK; CR_E_ARG (null out or pepper); CR_E_DECODE (cr_code_normalize
-///   refuses the code); CR_E_INIT / CR_E_INTERNAL from the HMAC. On error out
-///   is wiped
+///   refuses the code). On error out is wiped
 /// owns: nothing; the caller owns out and pepper. The local buffer holding the
 ///   normalized code and the HMAC state are wiped
-/// thread: main thread only
+/// thread: any thread (no shared state)
 /// example: var tag: CrHmacSha256; cr_code_hash(&tag, &pepper, typed);  // WHERE tag = ?
 export fn cr_code_hash(out: CrHmacSha256*, pepper: CrKey32*, code: string) -> int32 {
   if (out == 0 || pepper == 0) { return CR_E_ARG; }

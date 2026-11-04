@@ -82,7 +82,8 @@ fn cr_aead_mac(tag: uint8*, otk: uint8*, ad: uint8*, adlen: int64, ct: uint8*, c
 
 /// Generates a random XChaCha20-Poly1305 key.
 /// in: k
-/// returns: CR_OK; CR_E_ARG (null k); CR_E_INIT
+/// returns: CR_OK; CR_E_ARG (null k); CR_E_INTERNAL if the kernel random
+///   source fails
 /// owns: k is secret caller memory: cr_wipe(&k.b[0], 32) when done
 /// thread: any thread (no shared state)
 /// example: var k: CrKey32; cr_aead_keygen(&k); defer cr_wipe(&k.b[0], 32);
@@ -93,9 +94,10 @@ export fn cr_aead_keygen(k: CrKey32*) -> int32 {
 
 /// Generates a random 24-byte nonce. Call it once per message.
 /// in: n
-/// returns: CR_OK; CR_E_ARG (null n); CR_E_INIT
+/// returns: CR_OK; CR_E_ARG (null n); CR_E_INTERNAL if the kernel random
+///   source fails
 /// owns: nothing; the nonce is public and travels with the ciphertext
-/// thread: main thread only
+/// thread: any thread (no shared state)
 /// example: var nonce: CrNonce24; cr_aead_nonce(&nonce);
 export fn cr_aead_nonce(n: CrNonce24*) -> int32 {
   if (n == 0) { return CR_E_ARG; }
@@ -111,7 +113,7 @@ export fn cr_aead_nonce(n: CrNonce24*) -> int32 {
 ///   (cr_aead_nonce); key
 /// returns: CR_OK and *ct_len = mlen + 16; CR_E_ARG (null pointer with a
 ///   non-zero length, negative length, null nonce/key/ct_len); CR_E_SPACE
-///   if ct_cap is too small (nothing written, *ct_len = 0); CR_E_INIT
+///   if ct_cap is too small (nothing written, *ct_len = 0)
 /// owns: nothing; the caller owns every buffer and must wipe key and
 ///   plaintext when done
 /// thread: any thread (no shared state)
@@ -123,7 +125,6 @@ export fn cr_aead_encrypt(ct: uint8*, ct_cap: int64, ct_len: int64*, msg: uint8*
   if (mlen < 0 || adlen < 0 || ct_cap < 0) { return CR_E_ARG; }
   if ((msg == 0 && mlen > 0) || (ad == 0 && adlen > 0)) { return CR_E_ARG; }
   if (ct_cap - CR_AEAD_TAG_BYTES < mlen) { return CR_E_SPACE; }
-  if (cr_init() != CR_OK) { return CR_E_INIT; }
   var sub: uint8[32];
   var n12: uint8[12];
   var otk: uint8[32];
@@ -143,7 +144,7 @@ export fn cr_aead_encrypt(ct: uint8*, ct_cap: int64, ct_len: int64*, msg: uint8*
 ///   nonce; key
 /// returns: CR_OK and *pt_len = clen - 16; CR_E_VERIFY if the tag does not
 ///   match (wrong key, nonce or ad, tampered or truncated ciphertext,
-///   clen < 16); CR_E_ARG; CR_E_SPACE; CR_E_INIT. On every failure
+///   clen < 16); CR_E_ARG; CR_E_SPACE. On every failure
 ///   *pt_len = 0 and the first pt_cap bytes of pt are wiped (cr_wipe),
 ///   so no unauthenticated plaintext ever reaches the caller (when
 ///   decrypting in place, pt == ct, that also wipes the ciphertext)
@@ -166,10 +167,6 @@ export fn cr_aead_decrypt(pt: uint8*, pt_cap: int64, pt_len: int64*, ct: uint8*,
   if (pt_cap < clen - CR_AEAD_TAG_BYTES) {
     cr_wipe(pt, pt_cap);
     return CR_E_SPACE;
-  }
-  if (cr_init() != CR_OK) {
-    cr_wipe(pt, pt_cap);
-    return CR_E_INIT;
   }
   var mlen: int64 = clen - CR_AEAD_TAG_BYTES;
   var sub: uint8[32];

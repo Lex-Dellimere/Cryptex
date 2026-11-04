@@ -8,14 +8,15 @@ import "types";
 import "core";
 import "sha2";
 
-/// CrHmacSha256State: an incremental HMAC-SHA256 computation (held in caller
+/// CrHmacSha256State: an incremental HMAC-SHA256 computation. Use one state
+/// per computation (held in caller
 /// memory; 256 bytes reserved, the inner and outer hash contexts use
 /// 224).
 /// in: - (initialize with cr_hmac_sha256_init before use)
 /// returns: -
 /// owns: secret (it holds key-derived hash contexts): cr_hmac_sha256_final wipes it;
 ///   if you abandon a computation, call cr_wipe(cr_hmac_sha256_state_bytes(&st), 256)
-/// thread: one state per computation; any thread (no shared state)
+/// thread: any thread (no shared state)
 /// example: var st: CrHmacSha256State; cr_hmac_sha256_init(&st, k, klen);
 export struct CrHmacSha256State {
   st: uint64[32];
@@ -43,14 +44,13 @@ export fn cr_hmac_sha256_state_bytes(st: CrHmacSha256State*) -> uint8* {
 /// in: st; key readable for keylen bytes, keylen >= 0 (32+ random bytes
 ///   recommended; key may be 0 only when keylen == 0)
 /// returns: CR_OK; CR_E_ARG (null st, null key with keylen > 0,
-///   keylen < 0); CR_E_INIT
+///   keylen < 0)
 /// owns: st stays the caller's; the key is absorbed into st's hash contexts,
 ///   so the caller may wipe its key right away
 /// thread: any thread (no shared state)
 /// example: var st: CrHmacSha256State; cr_hmac_sha256_init(&st, &k[0], 32);
 export fn cr_hmac_sha256_init(st: CrHmacSha256State*, key: uint8*, keylen: int64) -> int32 {
   if (st == 0 || keylen < 0 || (key == 0 && keylen > 0)) { return CR_E_ARG; }
-  if (cr_init() != CR_OK) { return CR_E_INIT; }
   cr_wipe(cr_hmac_sha256_state_bytes(st), 256);
   var m: CrxHmac256* = (CrxHmac256*)&st->st[0];
   // The key, zero-padded to the block size (hashed first when longer).
@@ -118,7 +118,7 @@ export fn cr_hmac_sha256_final(st: CrHmacSha256State*, out: CrHmacSha256*) -> in
 /// Computes HMAC-SHA256(key, msg) in one call (init + update + final), for a
 /// key of any length.
 /// in: out; key/keylen as cr_hmac_sha256_init; msg/n as cr_hmac_sha256_update
-/// returns: CR_OK; CR_E_ARG; CR_E_INIT. On error out is left zeroed
+/// returns: CR_OK; CR_E_ARG. On error out is left zeroed
 /// owns: nothing; the temporary state is wiped
 /// thread: any thread (no shared state)
 /// example: var t: CrHmacSha256; cr_hmac_sha256(&t, &k[0], 32, m.chars, (int64)m.length);
@@ -156,14 +156,15 @@ export fn cr_hmac_sha256_verify(tag: CrHmacSha256*, key: uint8*, keylen: int64, 
   return ok;
 }
 
-/// CrHmacSha512State: an incremental HMAC-SHA512 computation (held in caller
+/// CrHmacSha512State: an incremental HMAC-SHA512 computation. Use one state
+/// per computation (held in caller
 /// memory; 512 bytes reserved, the inner and outer hash contexts use
 /// 416).
 /// in: - (initialize with cr_hmac_sha512_init before use)
 /// returns: -
 /// owns: secret (it holds key-derived hash contexts): cr_hmac_sha512_final wipes it;
 ///   if you abandon a computation, call cr_wipe(cr_hmac_sha512_state_bytes(&st), 512)
-/// thread: one state per computation; any thread (no shared state)
+/// thread: any thread (no shared state)
 /// example: var st: CrHmacSha512State; cr_hmac_sha512_init(&st, k, klen);
 export struct CrHmacSha512State {
   st: uint64[64];
@@ -191,14 +192,13 @@ export fn cr_hmac_sha512_state_bytes(st: CrHmacSha512State*) -> uint8* {
 /// in: st; key readable for keylen bytes, keylen >= 0 (32+ random bytes
 ///   recommended; key may be 0 only when keylen == 0)
 /// returns: CR_OK; CR_E_ARG (null st, null key with keylen > 0,
-///   keylen < 0); CR_E_INIT
+///   keylen < 0)
 /// owns: st stays the caller's; the key is absorbed into st's hash contexts,
 ///   so the caller may wipe its key right away
 /// thread: any thread (no shared state)
 /// example: var st: CrHmacSha512State; cr_hmac_sha512_init(&st, &k[0], 32);
 export fn cr_hmac_sha512_init(st: CrHmacSha512State*, key: uint8*, keylen: int64) -> int32 {
   if (st == 0 || keylen < 0 || (key == 0 && keylen > 0)) { return CR_E_ARG; }
-  if (cr_init() != CR_OK) { return CR_E_INIT; }
   cr_wipe(cr_hmac_sha512_state_bytes(st), 512);
   var m: CrxHmac512* = (CrxHmac512*)&st->st[0];
   // The key, zero-padded to the block size (hashed first when longer).
@@ -266,7 +266,7 @@ export fn cr_hmac_sha512_final(st: CrHmacSha512State*, out: CrHmacSha512*) -> in
 /// Computes HMAC-SHA512(key, msg) in one call (init + update + final), for a
 /// key of any length.
 /// in: out; key/keylen as cr_hmac_sha512_init; msg/n as cr_hmac_sha512_update
-/// returns: CR_OK; CR_E_ARG; CR_E_INIT. On error out is left zeroed
+/// returns: CR_OK; CR_E_ARG. On error out is left zeroed
 /// owns: nothing; the temporary state is wiped
 /// thread: any thread (no shared state)
 /// example: var t: CrHmacSha512; cr_hmac_sha512(&t, &k[0], 32, m.chars, (int64)m.length);

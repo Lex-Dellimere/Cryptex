@@ -1,23 +1,32 @@
-// crypto: misuse-resistant Mettle API over libsodium.
+// crypto: a misuse-resistant cryptography API, pure Mettle.
 //
 //   import "crypto/crypto";
+//
+// Everything is written in Mettle: no C code and no shared library. There is
+// no global state, so every function is safe to call from any thread.
 //
 // This facade has no exports of its own, so it re-exports every module
 // below (Mettle's rule for export-free modules). Each module documents its
 // functions with a /// contract (summary, in, returns, owns, thread,
-// example). Nothing here implements cryptography; every primitive is
-// libsodium's (1.0.18 or newer), see README.md.
+// example).
 //
 //   status   CR_OK, CR_E_* codes, cr_status_name
 //   types    fixed-size key/nonce/digest/signature structs (Cr*)
-//   core     cr_init, cr_random_bytes, cr_random_u32_below, cr_equal, cr_wipe
-//   hash     cr_sha256, cr_sha512, cr_blake2b
-//   mac      cr_hmac_sha256*, cr_hmac_sha512* (one-shot, streaming, verify)
+//   core     cr_init (a no-op kept for compatibility), cr_random_bytes,
+//            cr_random_u32_below, cr_equal, cr_wipe
+//   hash     cr_sha256, cr_sha512 (FIPS 180-4), cr_blake2b (RFC 7693)
+//   mac      cr_hmac_sha256*, cr_hmac_sha512* (RFC 2104; one-shot, streaming,
+//            verify)
+//   kdf      cr_hkdf_sha256, _extract, _expand (RFC 5869)
 //   pwhash   cr_pwhash_str, cr_pwhash_verify, cr_pwhash_needs_rehash, presets
+//            (Argon2id, RFC 9106)
 //   aead     cr_aead_keygen, cr_aead_nonce, cr_aead_encrypt, cr_aead_decrypt
+//            (XChaCha20-Poly1305: draft-irtf-cfrg-xchacha on RFC 8439)
 //   kx       cr_x25519_*, cr_kx_client_session_keys, cr_kx_server_session_keys
-//   sign     cr_ed25519_keypair, cr_ed25519_seed_keypair, cr_ed25519_sign, cr_ed25519_verify
-//   encode   cr_hex_*, cr_base64url_*
+//            (X25519, RFC 7748)
+//   sign     cr_ed25519_keypair, cr_ed25519_seed_keypair, cr_ed25519_sign,
+//            cr_ed25519_verify (Ed25519, RFC 8032)
+//   encode   cr_hex_*, cr_base64url_* (RFC 4648)
 //
 // Recipes (built only from the modules above):
 //   signed   cr_signed_sign/_verify, cr_signed_sign_until/_verify_until
@@ -25,13 +34,15 @@
 //   token    cr_token_new/_check/_bits/_hash (machine tokens, >= 128 bits)
 //            cr_code_new/_normalize/_hash (human codes, peppered HMAC)
 //   seal     cr_seal, cr_open (XChaCha20-Poly1305, nonce carried inside)
-//   totp     cr_hotp, cr_totp, cr_totp_verify, cr_totp_secret_*, cr_totp_uri (2FA codes)
+//   totp     cr_hotp, cr_totp, cr_totp_verify, cr_totp_secret_*, cr_totp_uri
+//            (2FA codes: RFC 4226, RFC 6238)
 
 import "status";
 import "types";
 import "core";
 import "hash";
 import "mac";
+import "kdf";
 import "pwhash";
 import "aead";
 import "kx";

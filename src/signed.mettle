@@ -1,4 +1,5 @@
-// Signed values: "value.SIG", a readable value with an HMAC-SHA256 tag.
+// Signed values, pure Mettle: "value.SIG", a readable value with an
+// HMAC-SHA256 tag (RFC 2104).
 //   SIG = base64url, no padding (always 43 chars), of
 //   HMAC-SHA256(key, le64(len(purpose)) || purpose || value)
 // where le64 is the purpose length as 8 bytes, little endian. The purpose
@@ -67,10 +68,9 @@ fn cr_signed_tag(out: CrHmacSha256*, key: CrKey32*, purpose: string, value: uint
 ///   purpose, 1..255 bytes; value, any bytes (may be empty)
 /// returns: CR_OK and *out_len = value.length + 44; CR_E_ARG (null out_len,
 ///   out or key; purpose length outside 1..255); CR_E_SPACE if out_cap is
-///   too small (nothing written); CR_E_INIT; CR_E_INTERNAL. On error
-///   *out_len = 0
+///   too small (nothing written). On error *out_len = 0
 /// owns: nothing; the caller owns out, the tag and encode buffers are wiped
-/// thread: main thread only
+/// thread: any thread (no shared state)
 /// example: var buf: uint8[128]; var n: int64; cr_signed_sign(&buf[0], 128, &n, &k, "remember", "user:42");
 export fn cr_signed_sign(out: uint8*, out_cap: int64, out_len: int64*, key: CrKey32*, purpose: string, value: string) -> int32 {
   if (out_len == 0) { return CR_E_ARG; }
@@ -124,11 +124,10 @@ export fn cr_signed_sign(out: uint8*, out_cap: int64, out_len: int64*, key: CrKe
 /// returns: CR_OK with *out_value the value and *key_index the matching key
 ///   (key_index > 0 means the value was signed with an older key: re-sign it
 ///   with keys[0]); CR_E_ARG (null out_value or keys, nkeys outside
-///   1..8, purpose length outside 1..255); CR_E_VERIFY; CR_E_INIT;
-///   CR_E_INTERNAL. On error *out_value = "" and *key_index = -1
+///   1..8, purpose length outside 1..255); CR_E_VERIFY. On error *out_value = "" and *key_index = -1
 /// owns: *out_value borrows signed_value (a view into it, not a copy; do not
 ///   free it, and keep signed_value alive while it is used)
-/// thread: main thread only
+/// thread: any thread (no shared state)
 /// example: var v: string; var ki: int32; if (cr_signed_verify(&v, &ki, &keys[0], 2, "remember", cookie) == CR_OK) { ... }
 export fn cr_signed_verify(out_value: string*, key_index: int32*, keys: CrKey32*, nkeys: int32, purpose: string, signed_value: string) -> int32 {
   if (out_value == 0) { return CR_E_ARG; }
@@ -237,10 +236,9 @@ fn cr_signed_until_tag(out: CrHmacSha256*, key: CrKey32*, purpose: string, expir
 ///   absolute expiry time, >= 0
 /// returns: CR_OK and *out_len = value.length + 61; CR_E_ARG (null out_len,
 ///   out or key; purpose length outside 1..255; expires < 0); CR_E_SPACE if
-///   out_cap is too small (nothing written); CR_E_INIT; CR_E_INTERNAL. On
-///   error *out_len = 0
+///   out_cap is too small (nothing written). On error *out_len = 0
 /// owns: nothing; the caller owns out, the tag and encode buffers are wiped
-/// thread: main thread only
+/// thread: any thread (no shared state)
 /// example: var buf: uint8[128]; var n: int64; cr_signed_sign_until(&buf[0], 128, &n, &k, "confirm-email", "user:42", now + 3600);
 export fn cr_signed_sign_until(out: uint8*, out_cap: int64, out_len: int64*, key: CrKey32*, purpose: string, value: string, expires: int64) -> int32 {
   if (out_len == 0) { return CR_E_ARG; }
@@ -315,11 +313,10 @@ export fn cr_signed_sign_until(out: uint8*, out_cap: int64, out_len: int64*, key
 ///   (key_index > 0 means the value was signed with an older key: re-sign it
 ///   with keys[0]), when now < expires; CR_E_EXPIRED when authentic but
 ///   now >= expires; CR_E_ARG (null out_value or keys, nkeys outside
-///   1..8, purpose length outside 1..255); CR_E_VERIFY; CR_E_INIT;
-///   CR_E_INTERNAL. On any error *out_value = "" and *key_index = -1
+///   1..8, purpose length outside 1..255); CR_E_VERIFY. On any error *out_value = "" and *key_index = -1
 /// owns: *out_value borrows signed_value (a view into it, not a copy; do not
 ///   free it, and keep signed_value alive while it is used)
-/// thread: main thread only
+/// thread: any thread (no shared state)
 /// example: var v: string; var ki: int32; if (cr_signed_verify_until(&v, &ki, &keys[0], 2, "confirm-email", token, now) == CR_OK) { ... }
 export fn cr_signed_verify_until(out_value: string*, key_index: int32*, keys: CrKey32*, nkeys: int32, purpose: string, signed_value: string, now: int64) -> int32 {
   if (out_value == 0) { return CR_E_ARG; }

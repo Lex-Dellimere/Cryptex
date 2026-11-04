@@ -1,5 +1,6 @@
-// Sealed messages: XChaCha20-Poly1305 with the nonce carried inside the
-// output, so callers never handle nonces.
+// Sealed messages, pure Mettle: XChaCha20-Poly1305 (draft-irtf-cfrg-xchacha
+// on RFC 8439) with the nonce carried inside the output, so callers never
+// handle nonces.
 //
 // Layout of a sealed message: nonce (24 bytes) || ciphertext || tag (16 bytes).
 // The nonce's first byte is the format version (CR_SEAL_VERSION, 1); the
@@ -41,11 +42,12 @@ export const CR_SEAL_VERSION: int32 = 1;
 /// returns: CR_OK and *out_len = mlen + 40; CR_E_ARG (null out/key/out_len,
 ///   negative length or capacity, null msg with mlen > 0, null ad with
 ///   adlen > 0); CR_E_SPACE if out_cap is too small (nothing written,
-///   *out_len = 0); CR_E_INIT; CR_E_INTERNAL. If a failure happens after
-///   writing started, *out_len = 0 and the first out_cap bytes of out are wiped
+///   *out_len = 0); CR_E_INTERNAL if the kernel random source fails. On every
+///   failure *out_len = 0, and once writing has started the first out_cap
+///   bytes of out are wiped
 /// owns: nothing; the caller owns every buffer and must wipe key and
 ///   plaintext when done
-/// thread: main thread only
+/// thread: any thread (no shared state)
 /// example: cr_seal(&box[0], 128, &blen, m.chars, (int64)m.length, 0, 0, &k);
 export fn cr_seal(out: uint8*, out_cap: int64, out_len: int64*, msg: uint8*, mlen: int64, ad: uint8*, adlen: int64, key: CrKey32*) -> int32 {
   if (out_len == 0) { return CR_E_ARG; }
@@ -85,10 +87,10 @@ export fn cr_seal(out: uint8*, out_cap: int64, out_len: int64*, msg: uint8*, mle
 ///   fails (wrong key or ad, tampered nonce, ciphertext or tag, slen < 40,
 ///   a version other than CR_SEAL_VERSION);
 ///   CR_E_SPACE if out_cap < slen - 40; CR_E_ARG (null out/key/sealed/
-///   out_len, negative length or capacity, null ad with adlen > 0); CR_E_INIT
+///   out_len, negative length or capacity, null ad with adlen > 0)
 /// owns: nothing; the caller owns every buffer and must wipe key and the
 ///   plaintext when done
-/// thread: main thread only
+/// thread: any thread (no shared state)
 /// example: if (cr_open(&pt[0], 128, &plen, &box[0], blen, 0, 0, &k) != CR_OK) { reject(); }
 export fn cr_open(out: uint8*, out_cap: int64, out_len: int64*, sealed: uint8*, slen: int64, ad: uint8*, adlen: int64, key: CrKey32*) -> int32 {
   if (out_len == 0) { return CR_E_ARG; }
