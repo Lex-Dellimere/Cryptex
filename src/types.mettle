@@ -26,6 +26,16 @@ export struct CrNonce24 {
   b: uint8[24];
 }
 
+/// CrNonce12: A 12-byte IETF ChaCha20-Poly1305 nonce (RFC 8439). Never reuse a key/nonce pair. Meant for protocols with counter nonces such as Noise; for random nonces use CrNonce24 and cr_aead_*.
+/// in: - (zeroed when declared: `var x: CrNonce12;`)
+/// returns: -
+/// owns: public: sent alongside the ciphertext, or implied by a message counter
+/// thread: any thread (no shared state)
+/// example: var n: CrNonce12; n.b[4] = 1; // Noise: 4 zero bytes || 64-bit LE counter
+export struct CrNonce12 {
+  b: uint8[12];
+}
+
 /// CrSha256: A SHA-256 digest.
 /// in: - (zeroed when declared: `var x: CrSha256;`)
 /// returns: -

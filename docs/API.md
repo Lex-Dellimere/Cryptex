@@ -212,6 +212,24 @@ A 24-byte XChaCha20-Poly1305 nonce. Random nonces of this size are safe to gener
 var n: CrNonce24; cr_aead_nonce(&n);
 ```
 
+### CrNonce12
+
+```mettle
+export struct CrNonce12 {
+  b: uint8[12];
+}
+```
+
+A 12-byte IETF ChaCha20-Poly1305 nonce (RFC 8439). Never reuse a key/nonce pair. Meant for protocols with counter nonces such as Noise; for random nonces use CrNonce24 and cr_aead_*.
+
+- **in:** - (zeroed when declared: `var x: CrNonce12;`)
+- **owns:** public: sent alongside the ciphertext, or implied by a message counter
+- **thread:** any thread (no shared state)
+
+```mettle
+var n: CrNonce12; n.b[4] = 1; // Noise: 4 zero bytes || 64-bit LE counter
+```
+
 ### CrSha256
 
 ```mettle
@@ -1104,7 +1122,7 @@ var h: CrPwHash; if (cr_pwhash_from_text(&h, row.hash) == CR_OK) { ... }
 
 ## aead
 
-Authenticated encryption: XChaCha20-Poly1305-IETF (draft-irtf-cfrg-xchacha-03 on top of RFC 8439), in pure Mettle.
+Authenticated encryption, in pure Mettle: XChaCha20-Poly1305-IETF (draft-irtf-cfrg-xchacha-03 on top of RFC 8439) and the plain IETF ChaCha20-Poly1305 of RFC 8439 section 2.8 with a 12-byte nonce.
 
 ### CR_AEAD_TAG_BYTES
 
@@ -1188,6 +1206,40 @@ Verifies and decrypts ct (ciphertext || tag) produced by cr_aead_encrypt with th
 
 ```mettle
 if (cr_aead_decrypt(&pt[0], 64, &plen, &ct[0], clen, 0, 0, &nonce, &k) != CR_OK) { reject(); }
+```
+
+### cr_chacha20poly1305_encrypt
+
+```mettle
+export fn cr_chacha20poly1305_encrypt(ct: uint8*, ct_cap: int64, ct_len: int64*, msg: uint8*, mlen: int64, ad: uint8*, adlen: int64, nonce: CrNonce12*, key: CrKey32*) -> int32
+```
+
+Encrypts and authenticates msg, and authenticates (does not encrypt) ad, with the IETF ChaCha20-Poly1305 of RFC 8439 section 2.8 (12-byte nonce). Output is ciphertext || 16-byte tag. For protocols with counter nonces such as Noise. The caller must never use the same key with the same nonce twice; with random nonces use cr_aead_encrypt (24-byte nonces) instead.
+
+- **in:** ct writable for ct_cap bytes, ct_cap >= mlen + CR_AEAD_TAG_BYTES (ct may equal msg for in-place encryption; no other overlap); ct_len, where the ciphertext length goes; msg/mlen the plaintext (mlen <= 274877906816, RFC 8439: 2^38 - 64); ad/adlen associated data (0, 0 for none); nonce, unique per key; key
+- **returns:** CR_OK and *ct_len = mlen + 16; CR_E_ARG (null pointer with a non-zero length, negative length, mlen above 274877906816, null nonce/key/ct_len); CR_E_SPACE if ct_cap is too small (nothing written, *ct_len = 0)
+- **owns:** nothing; the caller owns every buffer and must wipe key and plaintext when done
+- **thread:** any thread (no shared state)
+
+```mettle
+cr_chacha20poly1305_encrypt(&ct[0], 64, &clen, m.chars, (int64)m.length, 0, 0, &nonce, &k);
+```
+
+### cr_chacha20poly1305_decrypt
+
+```mettle
+export fn cr_chacha20poly1305_decrypt(pt: uint8*, pt_cap: int64, pt_len: int64*, ct: uint8*, clen: int64, ad: uint8*, adlen: int64, nonce: CrNonce12*, key: CrKey32*) -> int32
+```
+
+Verifies and decrypts ct (ciphertext || tag) produced by cr_chacha20poly1305_encrypt with the same key, nonce and ad (RFC 8439 section 2.8). Fails closed.
+
+- **in:** pt writable for pt_cap bytes, pt_cap >= clen - CR_AEAD_TAG_BYTES (pt may equal ct for in-place decryption); pt_len; ct/clen (clen - 16 <= 274877906816); ad/adlen; nonce; key
+- **returns:** CR_OK and *pt_len = clen - 16; CR_E_VERIFY if the tag does not match (wrong key, nonce or ad, tampered or truncated ciphertext, clen < 16); CR_E_ARG (including a message above 274877906816 bytes); CR_E_SPACE. On every failure *pt_len = 0 and the first pt_cap bytes of pt are wiped (cr_wipe), so no unauthenticated plaintext ever reaches the caller (when decrypting in place, pt == ct, that also wipes the ciphertext)
+- **owns:** nothing; the caller owns every buffer and must wipe the plaintext when done
+- **thread:** any thread (no shared state)
+
+```mettle
+if (cr_chacha20poly1305_decrypt(&pt[0], 64, &plen, &ct[0], clen, 0, 0, &nonce, &k) != CR_OK) { reject(); }
 ```
 
 ## kx

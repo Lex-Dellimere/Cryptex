@@ -1,0 +1,181 @@
+// IETF ChaCha20-Poly1305 (RFC 8439 section 2.8, 12-byte nonce): the
+// 2.8.2 test vector through the public functions, every row of
+// vec_chachapoly.mettle (key | nonce | ad | msg | ct||tag), tamper
+// detection (tag, ciphertext, ad, nonce) with wiped output, in-place use,
+// and the argument checks.
+import "crypto/crypto";
+import "tcheck";
+import "vec_chachapoly";
+
+fn rfc_vector() {
+  var key: CrKey32;
+  var nonce: CrNonce12;
+  var ad: uint8[12];
+  tc_unhex("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f", &key.b[0], 32);
+  tc_unhex("070000004041424344454647", &nonce.b[0], 12);
+  tc_unhex("50515253c0c1c2c3c4c5c6c7", &ad[0], 12);
+  var pt: string = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
+  var mlen: int64 = (int64)pt.length;
+  var ct: uint8[160];
+  var clen: int64 = 0;
+  tc_rc("2.8.2 encrypt", cr_chacha20poly1305_encrypt(&ct[0], 160, &clen, pt.chars, mlen, &ad[0], 12, &nonce, &key), CR_OK);
+  tc_ok("2.8.2 length", mlen == 114 && clen == 130);
+  tc_hex_eq("2.8.2 ciphertext", &ct[0], mlen,
+    "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b6116");
+  tc_hex_eq("2.8.2 tag", &ct[mlen], 16, "1ae10b594f09e26a7e902ecbd0600691");
+
+  var out: uint8[160];
+  var olen: int64 = 0;
+  tc_rc("2.8.2 decrypt", cr_chacha20poly1305_decrypt(&out[0], 160, &olen, &ct[0], clen, &ad[0], 12, &nonce, &key), CR_OK);
+  tc_ok("2.8.2 plaintext back", olen == mlen && cr_equal(&out[0], pt.chars, mlen));
+  cr_wipe(&key.b[0], 32);
+}
+
+fn vector_rows() {
+  var key: CrKey32;
+  var nonce: CrNonce12;
+  var ad: uint8[96];
+  var msg: uint8[1264];
+  var want: uint8[1264];
+  var ct: uint8[1264];
+  var pt: uint8[1264];
+  var r: int32 = 0;
+  while (r < VEC_CHACHAPOLY_N) {
+    var row: string = VEC_CHACHAPOLY[r];
+    tc_unhex(tc_field(row, 0), &key.b[0], 32);
+    var nlen: int64 = tc_unhex(tc_field(row, 1), &nonce.b[0], 12);
+    var adlen: int64 = tc_unhex(tc_field(row, 2), &ad[0], 96);
+    var mlen: int64 = tc_unhex(tc_field(row, 3), &msg[0], 1264);
+    var wlen: int64 = tc_unhex(tc_field(row, 4), &want[0], 1264);
+    tc_ok("row {r}: lengths", nlen == 12 && adlen >= 0 && mlen >= 0 && wlen == mlen + 16);
+
+    var clen: int64 = 0;
+    tc_rc("row {r}: encrypt", cr_chacha20poly1305_encrypt(&ct[0], 1264, &clen, &msg[0], mlen, &ad[0], adlen, &nonce, &key), CR_OK);
+    tc_ok("row {r}: ciphertext", clen == wlen && cr_equal(&ct[0], &want[0], wlen));
+
+    var plen: int64 = 0;
+    tc_rc("row {r}: decrypt", cr_chacha20poly1305_decrypt(&pt[0], 1264, &plen, &want[0], wlen, &ad[0], adlen, &nonce, &key), CR_OK);
+    tc_ok("row {r}: plaintext", plen == mlen && cr_equal(&pt[0], &msg[0], mlen));
+
+    // In place: encrypt over a copy of msg, decrypt over the ciphertext.
+    var i: int64 = 0;
+    while (i < mlen) {
+      pt[i] = msg[i];
+      i = i + 1;
+    }
+    clen = 0;
+    tc_rc("row {r}: in-place encrypt", cr_chacha20poly1305_encrypt(&pt[0], 1264, &clen, &pt[0], mlen, &ad[0], adlen, &nonce, &key), CR_OK);
+    tc_ok("row {r}: in-place ciphertext", clen == wlen && cr_equal(&pt[0], &want[0], wlen));
+    plen = 0;
+    tc_rc("row {r}: in-place decrypt", cr_chacha20poly1305_decrypt(&pt[0], 1264, &plen, &pt[0], clen, &ad[0], adlen, &nonce, &key), CR_OK);
+    tc_ok("row {r}: in-place plaintext", plen == mlen && cr_equal(&pt[0], &msg[0], mlen));
+
+    // One flipped bit in the tag, the ciphertext, the ad or the nonce.
+    var bit: uint8 = (uint8)(1 << (r % 8));
+    var k: int32 = 0;
+    while (k < 4) {
+      var ran: bool = false;
+      var rc: int32 = CR_OK;
+      tc_fill(&pt[0], 1264, 255);
+      plen = 99;
+      if (k == 0) {
+        var tpos: int64 = wlen - 1 - (int64)(r % 16);
+        want[tpos] = want[tpos] ^ bit;
+        rc = cr_chacha20poly1305_decrypt(&pt[0], 1264, &plen, &want[0], wlen, &ad[0], adlen, &nonce, &key);
+        want[tpos] = want[tpos] ^ bit;
+        ran = true;
+      }
+      if (k == 1 && mlen > 0) {
+        var cpos: int64 = ((int64)r * 7) % mlen;
+        want[cpos] = want[cpos] ^ bit;
+        rc = cr_chacha20poly1305_decrypt(&pt[0], 1264, &plen, &want[0], wlen, &ad[0], adlen, &nonce, &key);
+        want[cpos] = want[cpos] ^ bit;
+        ran = true;
+      }
+      if (k == 2 && adlen > 0) {
+        var apos: int64 = ((int64)r * 5) % adlen;
+        ad[apos] = ad[apos] ^ bit;
+        rc = cr_chacha20poly1305_decrypt(&pt[0], 1264, &plen, &want[0], wlen, &ad[0], adlen, &nonce, &key);
+        ad[apos] = ad[apos] ^ bit;
+        ran = true;
+      }
+      if (k == 3) {
+        var npos: int32 = r % 12;
+        nonce.b[npos] = nonce.b[npos] ^ bit;
+        rc = cr_chacha20poly1305_decrypt(&pt[0], 1264, &plen, &want[0], wlen, &ad[0], adlen, &nonce, &key);
+        nonce.b[npos] = nonce.b[npos] ^ bit;
+        ran = true;
+      }
+      if (ran) {
+        tc_rc("row {r}: tampered {k}", rc, CR_E_VERIFY);
+        tc_ok("row {r}: tampered {k} wiped", plen == 0 && tc_all_zero(&pt[0], 1264));
+      }
+      k = k + 1;
+    }
+    // The untouched row still decrypts after all the flips were undone.
+    tc_rc("row {r}: decrypt after tampering", cr_chacha20poly1305_decrypt(&pt[0], 1264, &plen, &want[0], wlen, &ad[0], adlen, &nonce, &key), CR_OK);
+    r = r + 1;
+  }
+}
+
+fn arguments() {
+  var key: CrKey32;
+  var nonce: CrNonce12;
+  var ct: uint8[64];
+  var out: uint8[64];
+  var clen: int64 = 0;
+  var plen: int64 = 0;
+  tc_rc("noise-style encrypt", cr_chacha20poly1305_encrypt(&ct[0], 64, &clen, "hello".chars, 5, 0, 0, &nonce, &key), CR_OK);
+  tc_ok("noise-style length", clen == 21);
+  nonce.b[4] = 1;
+  var clen2: int64 = 0;
+  var ct2: uint8[64];
+  tc_rc("counter 1 encrypt", cr_chacha20poly1305_encrypt(&ct2[0], 64, &clen2, "hello".chars, 5, 0, 0, &nonce, &key), CR_OK);
+  tc_ok("counter changes output", !cr_equal(&ct[0], &ct2[0], 21));
+  tc_rc("counter 1 decrypt", cr_chacha20poly1305_decrypt(&out[0], 64, &plen, &ct2[0], clen2, 0, 0, &nonce, &key), CR_OK);
+  tc_ok("counter 1 plaintext", plen == 5 && cr_equal(&out[0], "hello".chars, 5));
+  tc_rc("counter 0 rejects counter 1 data", cr_chacha20poly1305_decrypt(&out[0], 64, &plen, &ct[0], clen2, 0, 0, &nonce, &key), CR_E_VERIFY);
+
+  tc_rc("empty message", cr_chacha20poly1305_encrypt(&ct[0], 16, &clen, 0, 0, 0, 0, &nonce, &key), CR_OK);
+  tc_ok("empty message length", clen == 16);
+  tc_rc("empty message decrypt", cr_chacha20poly1305_decrypt(&out[0], 0, &plen, &ct[0], 16, 0, 0, &nonce, &key), CR_OK);
+  tc_ok("empty message plaintext length", plen == 0);
+
+  tc_rc("null ct_len", cr_chacha20poly1305_encrypt(&ct[0], 64, 0, 0, 0, 0, 0, &nonce, &key), CR_E_ARG);
+  tc_rc("null nonce", cr_chacha20poly1305_encrypt(&ct[0], 64, &clen, 0, 0, 0, 0, 0, &key), CR_E_ARG);
+  tc_rc("null key", cr_chacha20poly1305_encrypt(&ct[0], 64, &clen, 0, 0, 0, 0, &nonce, 0), CR_E_ARG);
+  tc_rc("null msg", cr_chacha20poly1305_encrypt(&ct[0], 64, &clen, 0, 5, 0, 0, &nonce, &key), CR_E_ARG);
+  tc_rc("null ad", cr_chacha20poly1305_encrypt(&ct[0], 64, &clen, 0, 0, 0, 3, &nonce, &key), CR_E_ARG);
+  tc_rc("negative mlen", cr_chacha20poly1305_encrypt(&ct[0], 64, &clen, &out[0], -1, 0, 0, &nonce, &key), CR_E_ARG);
+  tc_rc("negative adlen", cr_chacha20poly1305_encrypt(&ct[0], 64, &clen, 0, 0, &out[0], -1, &nonce, &key), CR_E_ARG);
+  tc_rc("space", cr_chacha20poly1305_encrypt(&ct[0], 20, &clen, "hello".chars, 5, 0, 0, &nonce, &key), CR_E_SPACE);
+  tc_ok("space: no length", clen == 0);
+
+  // RFC 8439 limit 2^38 - 64: the limit itself is only a space error, one
+  // more byte is an argument error.
+  clen = 99;
+  tc_rc("limit: at the limit", cr_chacha20poly1305_encrypt(&ct[0], 64, &clen, &out[0], 274877906816, 0, 0, &nonce, &key), CR_E_SPACE);
+  tc_rc("limit: over", cr_chacha20poly1305_encrypt(&ct[0], 64, &clen, &out[0], 274877906817, 0, 0, &nonce, &key), CR_E_ARG);
+  tc_ok("limit: no length", clen == 0);
+  tc_fill(&out[0], 64, 255);
+  tc_rc("limit: decrypt over", cr_chacha20poly1305_decrypt(&out[0], 64, &plen, &ct[0], 274877906816 + 17, 0, 0, &nonce, &key), CR_E_ARG);
+  tc_ok("limit: decrypt wiped", plen == 0 && tc_all_zero(&out[0], 64));
+  tc_rc("limit: decrypt at the limit", cr_chacha20poly1305_decrypt(&out[0], 64, &plen, &ct[0], 274877906816 + 16, 0, 0, &nonce, &key), CR_E_SPACE);
+
+  tc_fill(&out[0], 64, 255);
+  plen = 99;
+  tc_rc("decrypt null pt_len", cr_chacha20poly1305_decrypt(&out[0], 64, 0, &ct[0], 16, 0, 0, &nonce, &key), CR_E_ARG);
+  tc_rc("decrypt null key", cr_chacha20poly1305_decrypt(&out[0], 64, &plen, &ct[0], 16, 0, 0, &nonce, 0), CR_E_ARG);
+  tc_ok("decrypt null key wiped", plen == 0 && tc_all_zero(&out[0], 64));
+  tc_fill(&out[0], 64, 255);
+  tc_rc("shorter than a tag", cr_chacha20poly1305_decrypt(&out[0], 64, &plen, &ct[0], 15, 0, 0, &nonce, &key), CR_E_VERIFY);
+  tc_ok("shorter than a tag wiped", tc_all_zero(&out[0], 64));
+  tc_rc("decrypt space", cr_chacha20poly1305_decrypt(&out[0], 4, &plen, &ct2[0], clen2, 0, 0, &nonce, &key), CR_E_SPACE);
+}
+
+fn main() -> int32 {
+  rfc_vector();
+  vector_rows();
+  arguments();
+  return tc_finish("chachapoly");
+}
