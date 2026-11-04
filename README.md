@@ -109,6 +109,7 @@ mbuild test -r     # release
 Each `tests/<name>_test.mettle` is a test program. Two kinds of checks:
 
 - **Standard vectors** from the RFCs and FIPS documents.
+- **Wycheproof:** 1,954 known-hard edge cases from Google's Wycheproof project (X25519, Ed25519, both ChaCha20-Poly1305 forms, HMAC-SHA1/256/512, HKDF) in `tests/vec_wp_*.mettle`, rebuilt by `python3 -I tools/gen_wycheproof.py DIR`.
 - **libsodium vectors:** `tests/vec_*.mettle`, thousands of random cases computed by libsodium (and Python for SHA-1 and HKDF). Cryptex must match them byte for byte. Rebuild them with `python3 -I tools/gen_vectors.py`. Only that script needs libsodium; the library and its tests do not.
 
 `tests/dependent` is a small project that uses Cryptex the way your project would. Check it with `cd tests/dependent && mbuild run`.
