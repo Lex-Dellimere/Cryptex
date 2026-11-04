@@ -25,6 +25,7 @@
 //   token    cr_token_new/_check/_bits/_hash (machine tokens, >= 128 bits)
 //            cr_code_new/_normalize/_hash (human codes, peppered HMAC)
 //   seal     cr_seal, cr_open (XChaCha20-Poly1305, nonce carried inside)
+//   totp     cr_hotp, cr_totp, cr_totp_verify, cr_totp_secret_*, cr_totp_uri (2FA codes)
 
 import "status";
 import "types";
@@ -39,3 +40,4 @@ import "encode";
 import "signed";
 import "token";
 import "seal";
+import "totp";

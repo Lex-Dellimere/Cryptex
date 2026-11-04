@@ -5,7 +5,7 @@ Generated from the `///` contracts in `src/` by `tools/api_docs.py`. Do not edit
 Every function is **main thread only** (see reports/001) unless it says otherwise.
 
 Primitives: [status](#status), [types](#types), [core](#core), [hash](#hash), [mac](#mac), [pwhash](#pwhash), [aead](#aead), [kx](#kx), [sign](#sign), [encode](#encode).
-Recipes: [signed](#signed), [token](#token), [seal](#seal).
+Recipes: [signed](#signed), [token](#token), [seal](#seal), [totp](#totp).
 
 ## status
 
@@ -430,7 +430,7 @@ var h: CrPwHash; cr_pwhash_str(&h, pw.chars, (int64)pw.length, CR_PW_INTERACTIVE
 
 ## core
 
-Initialization, randomness, constant-time comparison and wiping. Backend: libsodium (sodium_init, randombytes_*, sodium_memcmp, sodium_memzero).
+Initialization (a no-op), randomness, constant-time comparison and wiping. Pure Mettle: randomness comes from the Linux getrandom(2) system call through the syscall built-in; there is no foreign code and no shared state, so every function in this library may be called from any thread.
 
 ### cr_init
 
@@ -438,11 +438,11 @@ Initialization, randomness, constant-time comparison and wiping. Backend: libsod
 export fn cr_init() -> int32
 ```
 
-Initializes libsodium. Idempotent: the first call runs sodium_init, later calls return immediately. Every other cr_ function calls it for you, so an explicit call is only needed to fail early at program start.
+Kept for compatibility: there is nothing to initialize. Safe to call any number of times, from any thread.
 
-- **returns:** CR_OK, or CR_E_INIT if libsodium cannot initialize (no entropy source); then every other function fails with CR_E_INIT / false
+- **returns:** CR_OK, always
 - **owns:** nothing
-- **thread:** main thread only (reports/001). sodium_init is itself thread-safe; the Mettle-side flag is a plain global
+- **thread:** any thread (no shared state)
 
 ```mettle
 if (cr_init() != CR_OK) { return 1; }
@@ -454,12 +454,12 @@ if (cr_init() != CR_OK) { return 1; }
 export fn cr_random_bytes(buf: uint8*, n: int64) -> int32
 ```
 
-Fills buf with n cryptographically secure random bytes (randombytes_buf, getrandom(2) on Linux).
+Fills buf with n cryptographically secure random bytes (the kernel's getrandom(2)).
 
 - **in:** buf, writable for n bytes (may be 0 only when n == 0); n >= 0
-- **returns:** CR_OK; CR_E_ARG for a null buf with n > 0 or n < 0; CR_E_INIT
+- **returns:** CR_OK; CR_E_ARG for a null buf with n > 0 or n < 0; CR_E_INTERNAL if the kernel random source fails
 - **owns:** nothing; the caller owns buf
-- **thread:** main thread only
+- **thread:** any thread (no shared state)
 
 ```mettle
 var salt: uint8[16]; cr_random_bytes(&salt[0], 16);
@@ -471,12 +471,12 @@ var salt: uint8[16]; cr_random_bytes(&salt[0], 16);
 export fn cr_random_u32_below(n: uint32, out: uint32*) -> int32
 ```
 
-Picks a uniformly distributed random integer in [0, n) without modulo bias (randombytes_uniform).
+Picks a uniformly distributed random integer in [0, n) without modulo bias (rejection sampling).
 
 - **in:** n >= 1, the exclusive upper bound; out, where the value goes
-- **returns:** CR_OK; CR_E_ARG if n == 0 or out is null (out untouched); CR_E_INIT
+- **returns:** CR_OK; CR_E_ARG if n == 0 or out is null (out untouched); CR_E_INTERNAL if the kernel random source fails
 - **owns:** nothing
-- **thread:** main thread only
+- **thread:** any thread (no shared state)
 
 ```mettle
 var die: uint32; cr_random_u32_below(6, &die);  // 0..5
@@ -488,12 +488,12 @@ var die: uint32; cr_random_u32_below(6, &die);  // 0..5
 export fn cr_equal(a: uint8*, b: uint8*, n: int64) -> bool
 ```
 
-Compares two byte ranges in constant time (sodium_memcmp): the time depends on n only, never on the contents. Use it for every comparison of secrets, tags and tokens; never use == or mem_equal for those.
+Compares two byte ranges in constant time: the time depends on n only, never on the contents. Use it for every comparison of secrets, tags and tokens; never use == or mem_equal for those.
 
 - **in:** a, b readable for n bytes; n >= 0
-- **returns:** true only if all n bytes are equal; false otherwise, and false for invalid arguments (null pointer with n > 0, n < 0) or CR_E_INIT
+- **returns:** true only if all n bytes are equal; false otherwise, and false for invalid arguments (null pointer with n > 0, n < 0)
 - **owns:** nothing
-- **thread:** main thread only
+- **thread:** any thread (no shared state)
 
 ```mettle
 if (cr_equal(&got.b[0], &want.b[0], 32)) { accept(); }
@@ -505,12 +505,12 @@ if (cr_equal(&got.b[0], &want.b[0], 32)) { accept(); }
 export fn cr_wipe(buf: uint8*, n: int64) -> int32
 ```
 
-Overwrites n bytes with zeros in a way the optimizer cannot remove (sodium_memzero). Call it on every secret (keys, seeds, passwords, plaintexts, HMAC states) as soon as you are done with it, including on error paths: `defer cr_wipe(&k.b[0], 32);`.
+Overwrites n bytes with zeros in a way the optimizer cannot remove (volatile stores). Call it on every secret (keys, seeds, passwords, plaintexts, HMAC states) as soon as you are done with it, including on error paths: `defer cr_wipe(&k.b[0], 32);`.
 
 - **in:** buf writable for n bytes; n >= 0
 - **returns:** CR_OK; CR_E_ARG for a null buf with n > 0 or n < 0
 - **owns:** nothing; the caller still owns (and frees) buf
-- **thread:** main thread only
+- **thread:** any thread (no shared state)
 
 ```mettle
 var k: CrKey32; cr_aead_keygen(&k); defer cr_wipe(&k.b[0], 32);
@@ -518,7 +518,7 @@ var k: CrKey32; cr_aead_keygen(&k); defer cr_wipe(&k.b[0], 32);
 
 ## hash
 
-Hashes: SHA-256, SHA-512 (crypto_hash_sha256/512) and BLAKE2b (crypto_generichash). Backend: libsodium.
+Hashes: SHA-256, SHA-512 (FIPS 180-4, sha2) and BLAKE2b (RFC 7693, blake2b), all pure Mettle.
 
 ### CR_BLAKE2B_MIN
 
@@ -526,7 +526,7 @@ Hashes: SHA-256, SHA-512 (crypto_hash_sha256/512) and BLAKE2b (crypto_generichas
 export const CR_BLAKE2B_MIN: int64 = 16;
 ```
 
-Smallest BLAKE2b output length cr_blake2b accepts (crypto_generichash_BYTES_MIN).
+Smallest BLAKE2b output length cr_blake2b accepts (a hash shorter than this is too weak to be useful).
 
 - **returns:** 16
 - **owns:** nothing
@@ -542,7 +542,7 @@ cr_blake2b(&o[0], CR_BLAKE2B_MIN, m, n, 0, 0);
 export const CR_BLAKE2B_MAX: int64 = 64;
 ```
 
-Largest BLAKE2b output and key length (crypto_generichash_BYTES_MAX / KEYBYTES_MAX).
+Largest BLAKE2b output and key length (the RFC 7693 maximum).
 
 - **returns:** 64
 - **owns:** nothing
@@ -558,7 +558,7 @@ var o: uint8[64]; cr_blake2b(&o[0], CR_BLAKE2B_MAX, m, n, 0, 0);
 export const CR_BLAKE2B_KEY_MIN: int64 = 16;
 ```
 
-Smallest non-empty BLAKE2b key (crypto_generichash_KEYBYTES_MIN).
+Smallest non-empty BLAKE2b key (shorter keys are too weak to be useful).
 
 - **returns:** 16
 - **owns:** nothing
@@ -574,12 +574,12 @@ cr_blake2b(&o[0], 32, m, n, &k[0], CR_BLAKE2B_KEY_MIN);
 export fn cr_sha256(out: CrSha256*, msg: uint8*, n: int64) -> int32
 ```
 
-Computes SHA-256 of n bytes (FIPS 180-4; libsodium crypto_hash_sha256).
+Computes SHA-256 of n bytes (FIPS 180-4).
 
 - **in:** out; msg readable for n bytes (may be 0 when n == 0); n >= 0
 - **returns:** CR_OK; CR_E_ARG (null out, null msg with n > 0, n < 0); CR_E_INIT. On error out is not written
 - **owns:** nothing; the caller owns out and msg
-- **thread:** main thread only
+- **thread:** any thread (no shared state)
 
 ```mettle
 var d: CrSha256; cr_sha256(&d, s.chars, (int64)s.length);
@@ -591,12 +591,12 @@ var d: CrSha256; cr_sha256(&d, s.chars, (int64)s.length);
 export fn cr_sha512(out: CrSha512*, msg: uint8*, n: int64) -> int32
 ```
 
-Computes SHA-512 of n bytes (FIPS 180-4; libsodium crypto_hash_sha512).
+Computes SHA-512 of n bytes (FIPS 180-4).
 
 - **in:** out; msg readable for n bytes (may be 0 when n == 0); n >= 0
 - **returns:** CR_OK; CR_E_ARG (null out, null msg with n > 0, n < 0); CR_E_INIT. On error out is not written
 - **owns:** nothing; the caller owns out and msg
-- **thread:** main thread only
+- **thread:** any thread (no shared state)
 
 ```mettle
 var d: CrSha512; cr_sha512(&d, s.chars, (int64)s.length);
@@ -608,12 +608,12 @@ var d: CrSha512; cr_sha512(&d, s.chars, (int64)s.length);
 export fn cr_blake2b(out: uint8*, outlen: int64, msg: uint8*, n: int64, key: uint8*, keylen: int64) -> int32
 ```
 
-Computes BLAKE2b (RFC 7693; libsodium crypto_generichash), optionally keyed (then it is a MAC/PRF), with a chosen output length.
+Computes BLAKE2b (RFC 7693), optionally keyed (then it is a MAC/PRF), with a chosen output length.
 
 - **in:** out writable for outlen bytes, outlen in [16, 64]; msg readable for n bytes (0 allowed when n == 0), n >= 0; key readable for keylen bytes, keylen 0 (unkeyed; key may be 0) or in [16, 64]
-- **returns:** CR_OK; CR_E_ARG for any length outside those ranges or a null pointer with a non-zero length; CR_E_INIT. On error out is not written
+- **returns:** CR_OK; CR_E_ARG for any length outside those ranges or a null pointer with a non-zero length. On error out is not written
 - **owns:** nothing; the caller owns out, msg and key (wipe the key yourself)
-- **thread:** main thread only
+- **thread:** any thread (no shared state)
 
 ```mettle
 var d: uint8[32]; cr_blake2b(&d[0], 32, s.chars, (int64)s.length, 0, 0);
@@ -621,7 +621,7 @@ var d: uint8[32]; cr_blake2b(&d[0], 32, s.chars, (int64)s.length, 0, 0);
 
 ## mac
 
-HMAC-SHA256 and HMAC-SHA512 (RFC 2104, FIPS 198-1) with keys of any length. Backend: libsodium crypto_auth_hmacsha256_* / _hmacsha512_* (init/update/final, so RFC 4231 keys of 4..131 bytes work; libsodium's one-shot crypto_auth_hmacsha256 takes a fixed 32-byte key only). Verification is constant time (sodium_memcmp).
+HMAC-SHA256 and HMAC-SHA512 (RFC 2104, FIPS 198-1) with keys of any length, in pure Mettle on top of sha2. The state keeps two running hashes (inner, outer) that were primed with the key pads, so no key copy stays around. Verification is constant time (cr_equal).
 
 ### CrHmacSha256State
 
@@ -631,11 +631,11 @@ export struct CrHmacSha256State {
 }
 ```
 
-an incremental HMAC-SHA256 computation (crypto_auth_hmacsha256_state, held in caller memory; 256 bytes reserved, libsodium needs 208).
+an incremental HMAC-SHA256 computation (held in caller memory; 256 bytes reserved, the inner and outer hash contexts use 224).
 
 - **in:** - (initialize with cr_hmac_sha256_init before use)
-- **owns:** secret (it holds key-derived pads): cr_hmac_sha256_final wipes it; if you abandon a computation, call cr_wipe(cr_hmac_sha256_state_bytes(&st), 256)
-- **thread:** one state per computation; main thread only
+- **owns:** secret (it holds key-derived hash contexts): cr_hmac_sha256_final wipes it; if you abandon a computation, call cr_wipe(cr_hmac_sha256_state_bytes(&st), 256)
+- **thread:** one state per computation; any thread (no shared state)
 
 ```mettle
 var st: CrHmacSha256State; cr_hmac_sha256_init(&st, k, klen);
@@ -651,8 +651,8 @@ Gives the address of a state's storage, for cr_wipe.
 
 - **in:** st
 - **returns:** a pointer to its 256 bytes (0 if st is 0)
-- **owns:** the pointer borrows st; it is caller memory, not libsodium's
-- **thread:** main thread only
+- **owns:** the pointer borrows st; it is caller memory
+- **thread:** any thread (no shared state)
 
 ```mettle
 cr_wipe(cr_hmac_sha256_state_bytes(&st), 256);
@@ -667,9 +667,9 @@ export fn cr_hmac_sha256_init(st: CrHmacSha256State*, key: uint8*, keylen: int64
 Starts an HMAC-SHA256 computation (RFC 2104 / FIPS 198-1) with a key of any length (longer than the block size it is hashed, as RFC 2104 says).
 
 - **in:** st; key readable for keylen bytes, keylen >= 0 (32+ random bytes recommended; key may be 0 only when keylen == 0)
-- **returns:** CR_OK; CR_E_ARG (null st, null key with keylen > 0, keylen < 0); CR_E_INIT; CR_E_INTERNAL if the linked libsodium's state is larger than this binding reserves
-- **owns:** st stays the caller's; the key is copied into st's pads, so the caller may wipe its key right away
-- **thread:** main thread only
+- **returns:** CR_OK; CR_E_ARG (null st, null key with keylen > 0, keylen < 0); CR_E_INIT
+- **owns:** st stays the caller's; the key is absorbed into st's hash contexts, so the caller may wipe its key right away
+- **thread:** any thread (no shared state)
 
 ```mettle
 var st: CrHmacSha256State; cr_hmac_sha256_init(&st, &k[0], 32);
@@ -686,7 +686,7 @@ Feeds n more message bytes into an HMAC-SHA256 computation.
 - **in:** st from cr_hmac_sha256_init; msg readable for n bytes; n >= 0
 - **returns:** CR_OK; CR_E_ARG (null st, null msg with n > 0, n < 0)
 - **owns:** nothing new
-- **thread:** main thread only
+- **thread:** any thread (no shared state)
 
 ```mettle
 cr_hmac_sha256_update(&st, part.chars, (int64)part.length);
@@ -703,7 +703,7 @@ Finishes an HMAC-SHA256 computation, writes the tag and wipes the state.
 - **in:** st from cr_hmac_sha256_init; out
 - **returns:** CR_OK; CR_E_ARG (null st or out)
 - **owns:** st is wiped (start again with cr_hmac_sha256_init to reuse it)
-- **thread:** main thread only
+- **thread:** any thread (no shared state)
 
 ```mettle
 var t: CrHmacSha256; cr_hmac_sha256_final(&st, &t);
@@ -718,9 +718,9 @@ export fn cr_hmac_sha256(out: CrHmacSha256*, key: uint8*, keylen: int64, msg: ui
 Computes HMAC-SHA256(key, msg) in one call (init + update + final), for a key of any length.
 
 - **in:** out; key/keylen as cr_hmac_sha256_init; msg/n as cr_hmac_sha256_update
-- **returns:** CR_OK; CR_E_ARG; CR_E_INIT; CR_E_INTERNAL. On error out is left zeroed
+- **returns:** CR_OK; CR_E_ARG; CR_E_INIT. On error out is left zeroed
 - **owns:** nothing; the temporary state is wiped
-- **thread:** main thread only
+- **thread:** any thread (no shared state)
 
 ```mettle
 var t: CrHmacSha256; cr_hmac_sha256(&t, &k[0], 32, m.chars, (int64)m.length);
@@ -732,12 +732,12 @@ var t: CrHmacSha256; cr_hmac_sha256(&t, &k[0], 32, m.chars, (int64)m.length);
 export fn cr_hmac_sha256_verify(tag: CrHmacSha256*, key: uint8*, keylen: int64, msg: uint8*, n: int64) -> bool
 ```
 
-Checks an HMAC-SHA256 tag in constant time: recomputes the tag and compares with sodium_memcmp.
+Checks an HMAC-SHA256 tag in constant time: recomputes the tag and compares with cr_equal.
 
 - **in:** tag, the received tag; key/keylen and msg/n as cr_hmac_sha256
 - **returns:** true only if the tag is valid; false for a wrong tag and for every error (fails closed)
 - **owns:** nothing; the recomputed tag is wiped
-- **thread:** main thread only
+- **thread:** any thread (no shared state)
 
 ```mettle
 if (!cr_hmac_sha256_verify(&t, &k[0], 32, m.chars, (int64)m.length)) { reject(); }
@@ -751,11 +751,11 @@ export struct CrHmacSha512State {
 }
 ```
 
-an incremental HMAC-SHA512 computation (crypto_auth_hmacsha512_state, held in caller memory; 512 bytes reserved, libsodium needs 416).
+an incremental HMAC-SHA512 computation (held in caller memory; 512 bytes reserved, the inner and outer hash contexts use 416).
 
 - **in:** - (initialize with cr_hmac_sha512_init before use)
-- **owns:** secret (it holds key-derived pads): cr_hmac_sha512_final wipes it; if you abandon a computation, call cr_wipe(cr_hmac_sha512_state_bytes(&st), 512)
-- **thread:** one state per computation; main thread only
+- **owns:** secret (it holds key-derived hash contexts): cr_hmac_sha512_final wipes it; if you abandon a computation, call cr_wipe(cr_hmac_sha512_state_bytes(&st), 512)
+- **thread:** one state per computation; any thread (no shared state)
 
 ```mettle
 var st: CrHmacSha512State; cr_hmac_sha512_init(&st, k, klen);
@@ -771,8 +771,8 @@ Gives the address of a state's storage, for cr_wipe.
 
 - **in:** st
 - **returns:** a pointer to its 512 bytes (0 if st is 0)
-- **owns:** the pointer borrows st; it is caller memory, not libsodium's
-- **thread:** main thread only
+- **owns:** the pointer borrows st; it is caller memory
+- **thread:** any thread (no shared state)
 
 ```mettle
 cr_wipe(cr_hmac_sha512_state_bytes(&st), 512);
@@ -787,9 +787,9 @@ export fn cr_hmac_sha512_init(st: CrHmacSha512State*, key: uint8*, keylen: int64
 Starts an HMAC-SHA512 computation (RFC 2104 / FIPS 198-1) with a key of any length (longer than the block size it is hashed, as RFC 2104 says).
 
 - **in:** st; key readable for keylen bytes, keylen >= 0 (32+ random bytes recommended; key may be 0 only when keylen == 0)
-- **returns:** CR_OK; CR_E_ARG (null st, null key with keylen > 0, keylen < 0); CR_E_INIT; CR_E_INTERNAL if the linked libsodium's state is larger than this binding reserves
-- **owns:** st stays the caller's; the key is copied into st's pads, so the caller may wipe its key right away
-- **thread:** main thread only
+- **returns:** CR_OK; CR_E_ARG (null st, null key with keylen > 0, keylen < 0); CR_E_INIT
+- **owns:** st stays the caller's; the key is absorbed into st's hash contexts, so the caller may wipe its key right away
+- **thread:** any thread (no shared state)
 
 ```mettle
 var st: CrHmacSha512State; cr_hmac_sha512_init(&st, &k[0], 32);
@@ -806,7 +806,7 @@ Feeds n more message bytes into an HMAC-SHA512 computation.
 - **in:** st from cr_hmac_sha512_init; msg readable for n bytes; n >= 0
 - **returns:** CR_OK; CR_E_ARG (null st, null msg with n > 0, n < 0)
 - **owns:** nothing new
-- **thread:** main thread only
+- **thread:** any thread (no shared state)
 
 ```mettle
 cr_hmac_sha512_update(&st, part.chars, (int64)part.length);
@@ -823,7 +823,7 @@ Finishes an HMAC-SHA512 computation, writes the tag and wipes the state.
 - **in:** st from cr_hmac_sha512_init; out
 - **returns:** CR_OK; CR_E_ARG (null st or out)
 - **owns:** st is wiped (start again with cr_hmac_sha512_init to reuse it)
-- **thread:** main thread only
+- **thread:** any thread (no shared state)
 
 ```mettle
 var t: CrHmacSha512; cr_hmac_sha512_final(&st, &t);
@@ -838,9 +838,9 @@ export fn cr_hmac_sha512(out: CrHmacSha512*, key: uint8*, keylen: int64, msg: ui
 Computes HMAC-SHA512(key, msg) in one call (init + update + final), for a key of any length.
 
 - **in:** out; key/keylen as cr_hmac_sha512_init; msg/n as cr_hmac_sha512_update
-- **returns:** CR_OK; CR_E_ARG; CR_E_INIT; CR_E_INTERNAL. On error out is left zeroed
+- **returns:** CR_OK; CR_E_ARG; CR_E_INIT. On error out is left zeroed
 - **owns:** nothing; the temporary state is wiped
-- **thread:** main thread only
+- **thread:** any thread (no shared state)
 
 ```mettle
 var t: CrHmacSha512; cr_hmac_sha512(&t, &k[0], 32, m.chars, (int64)m.length);
@@ -852,12 +852,12 @@ var t: CrHmacSha512; cr_hmac_sha512(&t, &k[0], 32, m.chars, (int64)m.length);
 export fn cr_hmac_sha512_verify(tag: CrHmacSha512*, key: uint8*, keylen: int64, msg: uint8*, n: int64) -> bool
 ```
 
-Checks an HMAC-SHA512 tag in constant time: recomputes the tag and compares with sodium_memcmp.
+Checks an HMAC-SHA512 tag in constant time: recomputes the tag and compares with cr_equal.
 
 - **in:** tag, the received tag; key/keylen and msg/n as cr_hmac_sha512
 - **returns:** true only if the tag is valid; false for a wrong tag and for every error (fails closed)
 - **owns:** nothing; the recomputed tag is wiped
-- **thread:** main thread only
+- **thread:** any thread (no shared state)
 
 ```mettle
 if (!cr_hmac_sha512_verify(&t, &k[0], 32, m.chars, (int64)m.length)) { reject(); }
@@ -1019,7 +1019,7 @@ var h: CrPwHash; if (cr_pwhash_from_text(&h, row.hash) == CR_OK) { ... }
 
 ## aead
 
-Authenticated encryption: XChaCha20-Poly1305-IETF (draft-irtf-cfrg-xchacha; libsodium crypto_aead_xchacha20poly1305_ietf_*).
+Authenticated encryption: XChaCha20-Poly1305-IETF (draft-irtf-cfrg-xchacha-03 on top of RFC 8439), in pure Mettle.
 
 ### CR_AEAD_TAG_BYTES
 
@@ -1027,7 +1027,7 @@ Authenticated encryption: XChaCha20-Poly1305-IETF (draft-irtf-cfrg-xchacha; libs
 export const CR_AEAD_TAG_BYTES: int64 = 16;
 ```
 
-Bytes the authentication tag adds to every ciphertext (crypto_aead_xchacha20poly1305_ietf_ABYTES).
+Bytes the authentication tag adds to every ciphertext.
 
 - **returns:** 16
 - **owns:** nothing
@@ -1048,7 +1048,7 @@ Generates a random XChaCha20-Poly1305 key.
 - **in:** k
 - **returns:** CR_OK; CR_E_ARG (null k); CR_E_INIT
 - **owns:** k is secret caller memory: cr_wipe(&k.b[0], 32) when done
-- **thread:** main thread only
+- **thread:** any thread (no shared state)
 
 ```mettle
 var k: CrKey32; cr_aead_keygen(&k); defer cr_wipe(&k.b[0], 32);
@@ -1082,7 +1082,7 @@ Encrypts and authenticates msg, and authenticates (does not encrypt) ad. Output 
 - **in:** ct writable for ct_cap bytes, ct_cap >= mlen + CR_AEAD_TAG_BYTES (ct may equal msg for in-place encryption; no other overlap); ct_len, where the ciphertext length goes; msg/mlen the plaintext; ad/adlen associated data (0, 0 for none); nonce, unique per key (cr_aead_nonce); key
 - **returns:** CR_OK and *ct_len = mlen + 16; CR_E_ARG (null pointer with a non-zero length, negative length, null nonce/key/ct_len); CR_E_SPACE if ct_cap is too small (nothing written, *ct_len = 0); CR_E_INIT
 - **owns:** nothing; the caller owns every buffer and must wipe key and plaintext when done
-- **thread:** main thread only
+- **thread:** any thread (no shared state)
 
 ```mettle
 cr_aead_encrypt(&ct[0], 64, &clen, m.chars, (int64)m.length, 0, 0, &nonce, &k);
@@ -1097,9 +1097,9 @@ export fn cr_aead_decrypt(pt: uint8*, pt_cap: int64, pt_len: int64*, ct: uint8*,
 Verifies and decrypts ct (ciphertext || tag) produced by cr_aead_encrypt with the same key, nonce and ad. Fails closed.
 
 - **in:** pt writable for pt_cap bytes, pt_cap >= clen - CR_AEAD_TAG_BYTES (pt may equal ct for in-place decryption); pt_len; ct/clen; ad/adlen; nonce; key
-- **returns:** CR_OK and *pt_len = clen - 16; CR_E_VERIFY if the tag does not match (wrong key, nonce or ad, tampered or truncated ciphertext, clen < 16); CR_E_ARG; CR_E_SPACE; CR_E_INIT. On every failure *pt_len = 0 and the first pt_cap bytes of pt are wiped (sodium_memzero), so no unauthenticated plaintext ever reaches the caller (when decrypting in place, pt == ct, that also wipes the ciphertext)
+- **returns:** CR_OK and *pt_len = clen - 16; CR_E_VERIFY if the tag does not match (wrong key, nonce or ad, tampered or truncated ciphertext, clen < 16); CR_E_ARG; CR_E_SPACE; CR_E_INIT. On every failure *pt_len = 0 and the first pt_cap bytes of pt are wiped (cr_wipe), so no unauthenticated plaintext ever reaches the caller (when decrypting in place, pt == ct, that also wipes the ciphertext)
 - **owns:** nothing; the caller owns every buffer and must wipe the plaintext when done
-- **thread:** main thread only
+- **thread:** any thread (no shared state)
 
 ```mettle
 if (cr_aead_decrypt(&pt[0], 64, &plen, &ct[0], clen, 0, 0, &nonce, &k) != CR_OK) { reject(); }
@@ -1268,7 +1268,7 @@ if (!cr_ed25519_verify(&sig, m.chars, (int64)m.length, &pk)) { reject(); }
 
 ## encode
 
-Encodings for tokens and keys: lowercase hex and base64url without padding (RFC 4648 section 5). Backend: libsodium sodium_bin2hex / sodium_hex2bin / sodium_bin2base64 / sodium_base642bin (constant-time implementations, so encoding secrets does not leak them through timing).
+Encodings for tokens and keys: lowercase hex and base64url without padding (RFC 4648 section 5). Pure Mettle and constant time in the data: characters and values are converted with arithmetic masks only, with no table lookup and no branch on a byte's value, so encoding or decoding a secret does not leak it through timing. Branches depend on lengths only.
 
 ### cr_hex_encoded_cap
 
@@ -1293,12 +1293,12 @@ var cap: int64 = cr_hex_encoded_cap(32);  // 65
 export fn cr_base64url_encoded_cap(n: int64) -> int64
 ```
 
-Capacity cr_base64url_encode needs for n input bytes, nul included (sodium_base64_encoded_len with the URL-safe no-padding variant).
+Capacity cr_base64url_encode needs for n input bytes, nul included: (4n + 2) / 3 + 1.
 
 - **in:** n >= 0
 - **returns:** the capacity, or -1 for a negative or absurdly large n
 - **owns:** nothing
-- **thread:** main thread only (calls libsodium)
+- **thread:** any thread (pure)
 
 ```mettle
 var cap: int64 = cr_base64url_encoded_cap(32);  // 44
@@ -1313,9 +1313,9 @@ export fn cr_hex_encode(out: uint8*, out_cap: int64, out_len: int64*, bin: uint8
 Encodes n bytes as lowercase hex.
 
 - **in:** out writable for out_cap >= cr_hex_encoded_cap(n) bytes; out_len; bin/n
-- **returns:** CR_OK and *out_len = 2n (text followed by a nul); CR_E_ARG; CR_E_SPACE if out_cap is too small (nothing written); CR_E_INIT. On error *out_len = 0
+- **returns:** CR_OK and *out_len = 2n (text followed by a nul); CR_E_ARG; CR_E_SPACE if out_cap is too small (nothing written). On error *out_len = 0
 - **owns:** nothing; the caller owns out
-- **thread:** main thread only
+- **thread:** any thread (no shared state)
 
 ```mettle
 var hx: uint8[65]; var hl: int64; cr_hex_encode(&hx[0], 65, &hl, &d.b[0], 32);
@@ -1330,9 +1330,9 @@ export fn cr_hex_decode(out: uint8*, out_cap: int64, out_len: int64*, text: uint
 Decodes hex (either case) strictly.
 
 - **in:** out writable for out_cap bytes; out_len; text/n, the hex digits (no nul needed)
-- **returns:** CR_OK and *out_len = n / 2; CR_E_DECODE for an odd length or any non-hex character (including spaces and a trailing nul); CR_E_SPACE if out_cap < n / 2; CR_E_ARG; CR_E_INIT. On error *out_len = 0 and out's first out_cap bytes are wiped
+- **returns:** CR_OK and *out_len = n / 2; CR_E_DECODE for an odd length or any non-hex character (including spaces and a trailing nul); CR_E_SPACE if out_cap < n / 2; CR_E_ARG. On error *out_len = 0 and out's first out_cap bytes are wiped
 - **owns:** nothing; the caller owns out
-- **thread:** main thread only
+- **thread:** any thread (no shared state)
 
 ```mettle
 var k: uint8[32]; var kl: int64; cr_hex_decode(&k[0], 32, &kl, s.chars, (int64)s.length);
@@ -1347,9 +1347,9 @@ export fn cr_base64url_encode(out: uint8*, out_cap: int64, out_len: int64*, bin:
 Encodes n bytes as base64url without padding (alphabet A-Z a-z 0-9 - _), the form used in URLs, cookies and tokens.
 
 - **in:** out writable for out_cap >= cr_base64url_encoded_cap(n) bytes; out_len; bin/n
-- **returns:** CR_OK and *out_len = the text length (a nul follows it); CR_E_ARG; CR_E_SPACE if out_cap is too small (nothing written); CR_E_INIT. On error *out_len = 0
+- **returns:** CR_OK and *out_len = the text length (a nul follows it); CR_E_ARG; CR_E_SPACE if out_cap is too small (nothing written). On error *out_len = 0
 - **owns:** nothing; the caller owns out
-- **thread:** main thread only
+- **thread:** any thread (no shared state)
 
 ```mettle
 var t: uint8[44]; var tl: int64; cr_base64url_encode(&t[0], 44, &tl, &raw[0], 32);
@@ -1364,9 +1364,9 @@ export fn cr_base64url_decode(out: uint8*, out_cap: int64, out_len: int64*, text
 Decodes unpadded base64url strictly.
 
 - **in:** out writable for out_cap bytes; out_len; text/n (no nul needed)
-- **returns:** CR_OK and *out_len = the decoded length; CR_E_DECODE for any character outside the base64url alphabet (including '=', '+', '/', spaces), a length of the form 4k+1, or non-zero trailing bits; CR_E_SPACE if out_cap < floor(3n / 4); CR_E_ARG; CR_E_INIT. On error *out_len = 0 and out's first out_cap bytes are wiped
+- **returns:** CR_OK and *out_len = the decoded length; CR_E_DECODE for any character outside the base64url alphabet (including '=', '+', '/', spaces), a length of the form 4k+1, or non-zero trailing bits; CR_E_SPACE if out_cap < floor(3n / 4); CR_E_ARG. On error *out_len = 0 and out's first out_cap bytes are wiped
 - **owns:** nothing; the caller owns out
-- **thread:** main thread only
+- **thread:** any thread (no shared state)
 
 ```mettle
 var raw: uint8[32]; var rl: int64; cr_base64url_decode(&raw[0], 32, &rl, t.chars, (int64)t.length);
@@ -1795,4 +1795,126 @@ Verifies and decrypts a message produced by cr_seal with the same key and ad. Fa
 
 ```mettle
 if (cr_open(&pt[0], 128, &plen, &box[0], blen, 0, 0, &k) != CR_OK) { reject(); }
+```
+
+## totp
+
+Time-based and counter-based one-time passwords for two-factor sign-in: HOTP (RFC 4226), TOTP (RFC 6238), the base32 text people type or scan (RFC 4648) and the otpauth:// provisioning URI that authenticator apps import (as a QR code). Pure Mettle on top of an internal HMAC-SHA1, which is what every authenticator app speaks; plain SHA-1 is not exposed.
+
+### CR_TOTP_SECRET_BYTES
+
+```mettle
+export const CR_TOTP_SECRET_BYTES: int64 = 20;
+```
+
+the recommended size of an authenticator secret, in bytes (160 bits, the HMAC-SHA1 output size; RFC 4226 requires at least 16). Generate one with cr_random_bytes.
+
+- **returns:** 20
+- **owns:** nothing
+- **thread:** constant
+
+```mettle
+var sec: uint8[20]; cr_random_bytes(&sec[0], CR_TOTP_SECRET_BYTES);
+```
+
+### cr_hotp
+
+```mettle
+export fn cr_hotp(out: uint32*, secret: uint8*, n: int64, counter: uint64, digits: int32) -> int32
+```
+
+Computes an HMAC-based one-time password (HOTP, RFC 4226 section 5): HMAC-SHA1 of the 8-byte big-endian counter under the secret, dynamic truncation, then the result modulo 10^digits.
+
+- **in:** out; secret readable for n bytes, 1 <= n <= 64 (CR_TOTP_SECRET_BYTES recommended; RFC 4226 requires at least 16); counter; digits 6, 7 or 8
+- **returns:** CR_OK and *out = the code as a number (format it with leading zeros to `digits` digits); CR_E_ARG for a null pointer, n outside 1..64 or digits outside 6..8 (*out = 0 when out is not null)
+- **owns:** nothing; the secret stays the caller's, internal temporaries are wiped
+- **thread:** any thread (no shared state)
+
+```mettle
+var code: uint32; cr_hotp(&code, &sec[0], 20, counter, 6);
+```
+
+### cr_totp
+
+```mettle
+export fn cr_totp(out: uint32*, secret: uint8*, n: int64, unix_time: int64, period: int32, digits: int32) -> int32
+```
+
+Computes a time-based one-time password (TOTP, RFC 6238 with HMAC-SHA1): the HOTP of the counter floor(unix_time / period).
+
+- **in:** out; secret readable for n bytes, 1 <= n <= 64; unix_time >= 0 (seconds since 1970-01-01 UTC); period 1..300 seconds (30 is what authenticator apps use); digits 6, 7 or 8 (6 is what authenticator apps use)
+- **returns:** CR_OK and *out = the code as a number (format it with leading zeros to `digits` digits); CR_E_ARG for any argument outside these ranges or a null pointer (*out = 0 when out is not null)
+- **owns:** nothing; internal temporaries are wiped
+- **thread:** any thread (no shared state)
+
+```mettle
+var code: uint32; cr_totp(&code, &sec[0], 20, now, 30, 6);
+```
+
+### cr_totp_verify
+
+```mettle
+export fn cr_totp_verify(code: string, secret: uint8*, n: int64, unix_time: int64, period: int32, digits: int32, window: int32, matched_step: int64*) -> bool
+```
+
+Checks a code a user typed against the codes for the time steps from window steps before to window steps after the current one (to tolerate clock drift and typing delay). The code for every step in the range is computed and compared with cr_equal, with no early exit, so timing does not reveal which step (if any) matched. REPLAY: a code stays valid for its whole step, so the caller must keep the last accepted step per user and reject a matched step <= that one (store the new step when a code is accepted), or one code can be used twice. Throttle failed attempts too; six digits are guessable.
+
+- **in:** code, exactly `digits` ASCII digits '0'..'9'; secret readable for n bytes, 1 <= n <= 64; unix_time >= 0; period 1..300; digits 6..8; window 0..10 steps on each side; matched_step, where the matching step number (unix_time / period + offset) goes (may be 0)
+- **returns:** true if the code matches one of the steps; false otherwise and for any invalid argument or a code that is not `digits` ASCII digits (it fails closed). *matched_step = the step that matched, else -1 (when matched_step is not null)
+- **owns:** nothing; internal temporaries are wiped
+- **thread:** any thread (no shared state)
+
+```mettle
+var step: int64; if (cr_totp_verify(typed, &sec[0], 20, now, 30, 6, 1, &step) && step > last_step) { accept(step); }
+```
+
+### cr_totp_secret_text
+
+```mettle
+export fn cr_totp_secret_text(out: uint8*, out_cap: int64, out_len: int64*, secret: uint8*, n: int64) -> int32
+```
+
+Writes a secret as RFC 4648 base32 (alphabet A-Z 2-7, uppercase, no padding), the text authenticator apps accept and show. Capacity needed: (8n + 4) / 5 + 1 bytes (the text plus a nul).
+
+- **in:** out writable for out_cap bytes; out_len; secret readable for n bytes, n >= 0
+- **returns:** CR_OK and *out_len = the text length (a nul follows it); CR_E_ARG (null out or out_len, null secret with n > 0, n < 0 or absurdly large); CR_E_SPACE if out_cap < (8n + 4) / 5 + 1 (nothing written). On error *out_len = 0
+- **owns:** nothing; the caller owns out (it holds the secret: wipe it with cr_wipe when done)
+- **thread:** any thread (no shared state)
+
+```mettle
+var t: uint8[33]; var tl: int64; cr_totp_secret_text(&t[0], 33, &tl, &sec[0], 20);
+```
+
+### cr_totp_secret_from_text
+
+```mettle
+export fn cr_totp_secret_from_text(out: uint8*, out_cap: int64, out_len: int64*, text: string) -> int32
+```
+
+Reads the base32 text people paste or type into a secret: accepts lowercase, skips spaces and '-' (so "jbsw y3dp-ehpk 3pxp" works) and rejects everything else, including '=' padding. The text must be canonical: a last group of 1, 3 or 6 characters, or non-zero trailing bits, is refused. The spaces and '-' are the only characters whose position is treated as public.
+
+- **in:** out writable for out_cap bytes; out_len; text (not necessarily nul terminated)
+- **returns:** CR_OK and *out_len = the decoded length (5 bytes per 8 characters); CR_E_DECODE for a bad character, bad group length or non-zero trailing bits; CR_E_SPACE if out_cap is smaller than the decoded length; CR_E_ARG (null out or out_len, null text with length > 0, negative out_cap). On error *out_len = 0 and out's first out_cap bytes are wiped
+- **owns:** nothing; the caller owns out (a secret: wipe it with cr_wipe when done)
+- **thread:** any thread (no shared state)
+
+```mettle
+var sec: uint8[64]; var sl: int64; cr_totp_secret_from_text(&sec[0], 64, &sl, typed);
+```
+
+### cr_totp_uri
+
+```mettle
+export fn cr_totp_uri(out: uint8*, out_cap: int64, out_len: int64*, issuer: string, account: string, secret_text: string, digits: int32, period: int32) -> int32
+```
+
+Builds the otpauth:// URI that authenticator apps import (usually shown as a QR code): otpauth://totp/ISSUER:ACCOUNT?secret=...&issuer=ISSUER& algorithm=SHA1&digits=D&period=P, with issuer and account percent-encoded (every byte except A-Z a-z 0-9 - . _ ~ becomes %XX, uppercase hex). It ends with a nul after the text.
+
+- **in:** out writable for out_cap bytes; out_len; issuer and account, each 1..255 bytes without ':' (the service name, and the user's name or email); secret_text, the secret as base32 A-Z 2-7 (cr_totp_secret_text) and not empty; digits 6..8 (apps only show 6 reliably); period 1..300 (30)
+- **returns:** CR_OK and *out_len = the URI length (a nul follows it); CR_E_ARG for a bad label, secret text, digits or period or a null pointer; CR_E_SPACE if out_cap is too small (nothing written). On error *out_len = 0
+- **owns:** nothing; the caller owns out (it contains the secret: wipe it with cr_wipe when done)
+- **thread:** any thread (no shared state)
+
+```mettle
+var u: uint8[512]; var ul: int64; cr_totp_uri(&u[0], 512, &ul, "Mettle", "nox@example.com", st, 6, 30);
 ```
