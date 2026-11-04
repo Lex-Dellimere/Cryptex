@@ -1,0 +1,47 @@
+// X25519 against every libsodium-generated row of vec_x25519.mettle
+// (sk | pk | peer | shared): public_from_secret(sk) == pk and
+// shared(sk, peer) == shared.
+import "crypto/crypto";
+import "tcheck";
+import "vec_x25519";
+
+fn main() -> int32 {
+  var sk: CrX25519Secret;
+  var peer: CrX25519Public;
+  var pk: CrX25519Public;
+  var sh: CrX25519Shared;
+  for r in 0..VEC_X25519_N {
+    var row: string = VEC_X25519[r];
+    var label: string = "row {r}";
+    tc_ok(label + " sk", tc_unhex(tc_field(row, 0), &sk.b[0], 32) == 32);
+    tc_ok(label + " peer", tc_unhex(tc_field(row, 2), &peer.b[0], 32) == 32);
+    tc_rc(label + " public rc", cr_x25519_public_from_secret(&pk, &sk), CR_OK);
+    tc_hex_eq(label + " public", &pk.b[0], 32, tc_field(row, 1));
+    tc_rc(label + " shared rc", cr_x25519_shared(&sh, &sk, &peer), CR_OK);
+    tc_hex_eq(label + " shared", &sh.b[0], 32, tc_field(row, 3));
+    // The top bit of the peer's u-coordinate is ignored (RFC 7748 5).
+    peer.b[31] = peer.b[31] ^ 128;
+    var sh2: CrX25519Shared;
+    tc_rc(label + " top-bit shared rc", cr_x25519_shared(&sh2, &sk, &peer), CR_OK);
+    tc_ok(label + " top bit ignored", cr_equal(&sh.b[0], &sh2.b[0], 32));
+  }
+
+  // RFC 7748 section 5.2: k = u = 9, then k, u = X25519(k, u), k.
+  var k: CrX25519Secret;
+  var u: CrX25519Public;
+  var next: CrX25519Shared;
+  k.b[0] = 9;
+  u.b[0] = 9;
+  for it in 1..1001 {
+    tc_rc("iterate {it} rc", cr_x25519_shared(&next, &k, &u), CR_OK);
+    for i in 0..32 {
+      u.b[i] = k.b[i];
+      k.b[i] = next.b[i];
+    }
+    if (it == 1) {
+      tc_hex_eq("rfc7748 iterated x1", &k.b[0], 32, "422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079");
+    }
+  }
+  tc_hex_eq("rfc7748 iterated x1000", &k.b[0], 32, "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51");
+  return tc_finish("x25519_vec");
+}

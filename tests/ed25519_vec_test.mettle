@@ -1,0 +1,81 @@
+// Ed25519 against every libsodium-generated row of vec_ed25519.mettle
+// (seed | pk | msg | sig): the seed gives pk, signing gives sig, verifying
+// accepts it, and one flipped bit in the message, signature or public key,
+// or a non-canonical S (S + L), is rejected.
+import "crypto/crypto";
+import "tcheck";
+import "vec_ed25519";
+
+// The group order L, little endian.
+var g_l: uint8[32] = [
+  0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10
+];
+
+fn main() -> int32 {
+  var seed: CrSeed32;
+  var want_pk: CrEd25519Public;
+  var pk: CrEd25519Public;
+  var sk: CrEd25519Secret;
+  var sig: CrEd25519Sig;
+  var want: CrEd25519Sig;
+  var bad: CrEd25519Sig;
+  var bad_pk: CrEd25519Public;
+  var msg: uint8[640];
+  var bmsg: uint8[640];
+  for r in 0..VEC_ED25519_N {
+    var row: string = VEC_ED25519[r];
+    var label: string = "row {r}";
+    tc_ok(label + " seed", tc_unhex(tc_field(row, 0), &seed.b[0], 32) == 32);
+    tc_ok(label + " pk", tc_unhex(tc_field(row, 1), &want_pk.b[0], 32) == 32);
+    var n: int64 = tc_unhex(tc_field(row, 2), &msg[0], 640);
+    tc_ok(label + " msg", n >= 0);
+    tc_ok(label + " sig", tc_unhex(tc_field(row, 3), &want.b[0], 64) == 64);
+
+    tc_rc(label + " keypair rc", cr_ed25519_seed_keypair(&pk, &sk, &seed), CR_OK);
+    tc_hex_eq(label + " public key", &pk.b[0], 32, tc_field(row, 1));
+    tc_ok(label + " sk = seed || pk", cr_equal(&sk.b[0], &seed.b[0], 32) && cr_equal(&sk.b[32], &want_pk.b[0], 32));
+    tc_rc(label + " sign rc", cr_ed25519_sign(&sig, &msg[0], n, &sk), CR_OK);
+    tc_hex_eq(label + " signature", &sig.b[0], 64, tc_field(row, 3));
+    tc_ok(label + " verify", cr_ed25519_verify(&want, &msg[0], n, &want_pk));
+
+    // One flipped bit in the message.
+    if (n > 0) {
+      for i in 0..n { bmsg[i] = msg[i]; }
+      var at: int64 = (int64)r % n;
+      bmsg[at] = bmsg[at] ^ (uint8)(1 << (r % 8));
+      tc_ok(label + " flipped message rejected", !cr_ed25519_verify(&want, &bmsg[0], n, &want_pk));
+    }
+    // One flipped bit in the signature (R part and S part alternate).
+    for i in 0..64 { bad.b[i] = want.b[i]; }
+    bad.b[(r * 7) % 64] = bad.b[(r * 7) % 64] ^ (uint8)(1 << ((r * 3) % 8));
+    tc_ok(label + " flipped signature rejected", !cr_ed25519_verify(&bad, &msg[0], n, &want_pk));
+    // One flipped bit in the public key.
+    for i in 0..32 { bad_pk.b[i] = want_pk.b[i]; }
+    bad_pk.b[(r * 5) % 32] = bad_pk.b[(r * 5) % 32] ^ (uint8)(1 << ((r * 3 + 1) % 8));
+    tc_ok(label + " flipped public key rejected", !cr_ed25519_verify(&want, &msg[0], n, &bad_pk));
+    // S + L is the same scalar mod L but not canonical.
+    for i in 0..64 { bad.b[i] = want.b[i]; }
+    var carry: int32 = 0;
+    for i in 0..32 {
+      var v: int32 = (int32)want.b[32 + i] + (int32)g_l[i] + carry;
+      bad.b[32 + i] = (uint8)(v & 255);
+      carry = v >> 8;
+    }
+    tc_ok(label + " S + L rejected", !cr_ed25519_verify(&bad, &msg[0], n, &want_pk));
+    cr_wipe(&sk.b[0], 64);
+    cr_wipe(&seed.b[0], 32);
+  }
+
+  // Small-order points: the identity as R, or as the public key, is refused.
+  var m1: uint8[1] = [7];
+  for i in 0..64 { bad.b[i] = 0; }
+  bad.b[0] = 1;
+  tc_ok("identity R and zero S refused", !cr_ed25519_verify(&bad, &m1[0], 1, &want_pk));
+  for i in 0..32 { bad_pk.b[i] = 0; }
+  bad_pk.b[0] = 1;
+  tc_ok("identity public key refused", !cr_ed25519_verify(&want, &m1[0], 1, &bad_pk));
+  bad_pk.b[0] = 0;
+  tc_ok("zero public key refused", !cr_ed25519_verify(&want, &m1[0], 1, &bad_pk));
+  return tc_finish("ed25519_vec");
+}

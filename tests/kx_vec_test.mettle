@@ -1,0 +1,30 @@
+// crypto_kx-style session keys against every libsodium-generated row of
+// vec_kx.mettle (client sk | client pk | server sk | server pk | client rx |
+// client tx | server rx | server tx).
+import "crypto/crypto";
+import "tcheck";
+import "vec_kx";
+
+fn main() -> int32 {
+  var csk: CrX25519Secret;
+  var cpk: CrX25519Public;
+  var ssk: CrX25519Secret;
+  var spk: CrX25519Public;
+  var rx: CrKey32;
+  var tx: CrKey32;
+  for r in 0..VEC_KX_N {
+    var row: string = VEC_KX[r];
+    var label: string = "row {r}";
+    tc_ok(label + " csk", tc_unhex(tc_field(row, 0), &csk.b[0], 32) == 32);
+    tc_ok(label + " cpk", tc_unhex(tc_field(row, 1), &cpk.b[0], 32) == 32);
+    tc_ok(label + " ssk", tc_unhex(tc_field(row, 2), &ssk.b[0], 32) == 32);
+    tc_ok(label + " spk", tc_unhex(tc_field(row, 3), &spk.b[0], 32) == 32);
+    tc_rc(label + " client rc", cr_kx_client_session_keys(&rx, &tx, &cpk, &csk, &spk), CR_OK);
+    tc_hex_eq(label + " client rx", &rx.b[0], 32, tc_field(row, 4));
+    tc_hex_eq(label + " client tx", &tx.b[0], 32, tc_field(row, 5));
+    tc_rc(label + " server rc", cr_kx_server_session_keys(&rx, &tx, &spk, &ssk, &cpk), CR_OK);
+    tc_hex_eq(label + " server rx", &rx.b[0], 32, tc_field(row, 6));
+    tc_hex_eq(label + " server tx", &tx.b[0], 32, tc_field(row, 7));
+  }
+  return tc_finish("kx_vec");
+}
