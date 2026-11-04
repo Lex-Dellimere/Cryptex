@@ -1,5 +1,5 @@
 // Authenticated encryption: XChaCha20-Poly1305-IETF
-// (draft-irtf-cfrg-xchacha; libsodium crypto_aead_xchacha20poly1305_ietf_*).
+// (draft-irtf-cfrg-xchacha-03 on top of RFC 8439), in pure Mettle.
 //
 // 24-byte nonces are large enough to pick at random for every message
 // (cr_aead_nonce), so nonce reuse needs no counter bookkeeping. Never encrypt
@@ -9,13 +9,10 @@
 import "status";
 import "types";
 import "core";
+import "chacha";
+import "poly1305";
 
-extern fn crypto_aead_xchacha20poly1305_ietf_encrypt(c: uint8*, clen_p: uint64*, m: uint8*, mlen: uint64, ad: uint8*, adlen: uint64, nsec: uint8*, npub: uint8*, k: uint8*) -> int32 = "crypto_aead_xchacha20poly1305_ietf_encrypt";
-extern fn crypto_aead_xchacha20poly1305_ietf_decrypt(m: uint8*, mlen_p: uint64*, nsec: uint8*, c: uint8*, clen: uint64, ad: uint8*, adlen: uint64, npub: uint8*, k: uint8*) -> int32 = "crypto_aead_xchacha20poly1305_ietf_decrypt";
-extern fn crypto_aead_xchacha20poly1305_ietf_keygen(k: uint8*) = "crypto_aead_xchacha20poly1305_ietf_keygen";
-
-/// Bytes the authentication tag adds to every ciphertext
-/// (crypto_aead_xchacha20poly1305_ietf_ABYTES).
+/// Bytes the authentication tag adds to every ciphertext.
 /// in: -
 /// returns: 16
 /// owns: nothing
@@ -30,17 +27,68 @@ fn cr_aead_ptr(p: uint8*, n: int64) -> uint8* {
   return p;
 }
 
+// Splits key and the 24-byte nonce into the ChaCha20 subkey (HChaCha20), the
+// 12-byte ChaCha20 nonce (4 zero bytes || nonce[16..24]) and the Poly1305
+// one-time key (first 32 bytes of block 0). The caller wipes sub and otk.
+fn cr_aead_derive(key: uint8*, nonce: uint8*, sub: uint8*, n12: uint8*, otk: uint8*) {
+  var blk: uint8[64];
+  crx_hchacha20(sub, key, nonce);
+  var i: int32 = 0;
+  while (i < 4) {
+    n12[i] = 0;
+    i = i + 1;
+  }
+  while (i < 12) {
+    n12[i] = nonce[12 + i];
+    i = i + 1;
+  }
+  crx_chacha20_block(sub, 0, n12, &blk[0]);
+  i = 0;
+  while (i < 32) {
+    otk[i] = blk[i];
+    i = i + 1;
+  }
+  cr_wipe(&blk[0], 64);
+}
+
+// Poly1305 over ad || pad16 || ct || pad16 || le64(adlen) || le64(clen)
+// (RFC 8439 2.8). All lengths are public.
+fn cr_aead_mac(tag: uint8*, otk: uint8*, ad: uint8*, adlen: int64, ct: uint8*, clen: int64) {
+  var st: CrxPoly1305;
+  var zero: uint8[16];
+  var lens: uint8[16];
+  var i: int32 = 0;
+  while (i < 16) {
+    zero[i] = 0;
+    lens[i] = 0;
+    i = i + 1;
+  }
+  crx_poly1305_init(&st, otk);
+  crx_poly1305_update(&st, ad, adlen);
+  crx_poly1305_update(&st, &zero[0], (16 - adlen % 16) % 16);
+  crx_poly1305_update(&st, ct, clen);
+  crx_poly1305_update(&st, &zero[0], (16 - clen % 16) % 16);
+  var a: uint64 = (uint64)adlen;
+  var c: uint64 = (uint64)clen;
+  i = 0;
+  while (i < 8) {
+    lens[i] = (uint8)((a >> (i * 8)) & (uint64)0xff);
+    lens[8 + i] = (uint8)((c >> (i * 8)) & (uint64)0xff);
+    i = i + 1;
+  }
+  crx_poly1305_update(&st, &lens[0], 16);
+  crx_poly1305_final(&st, tag);
+}
+
 /// Generates a random XChaCha20-Poly1305 key.
 /// in: k
 /// returns: CR_OK; CR_E_ARG (null k); CR_E_INIT
 /// owns: k is secret caller memory: cr_wipe(&k.b[0], 32) when done
-/// thread: main thread only
+/// thread: any thread (no shared state)
 /// example: var k: CrKey32; cr_aead_keygen(&k); defer cr_wipe(&k.b[0], 32);
 export fn cr_aead_keygen(k: CrKey32*) -> int32 {
   if (k == 0) { return CR_E_ARG; }
-  if (cr_init() != CR_OK) { return CR_E_INIT; }
-  crypto_aead_xchacha20poly1305_ietf_keygen(&k->b[0]);
-  return CR_OK;
+  return cr_random_bytes(&k->b[0], 32);
 }
 
 /// Generates a random 24-byte nonce. Call it once per message.
@@ -66,7 +114,7 @@ export fn cr_aead_nonce(n: CrNonce24*) -> int32 {
 ///   if ct_cap is too small (nothing written, *ct_len = 0); CR_E_INIT
 /// owns: nothing; the caller owns every buffer and must wipe key and
 ///   plaintext when done
-/// thread: main thread only
+/// thread: any thread (no shared state)
 /// example: cr_aead_encrypt(&ct[0], 64, &clen, m.chars, (int64)m.length, 0, 0, &nonce, &k);
 export fn cr_aead_encrypt(ct: uint8*, ct_cap: int64, ct_len: int64*, msg: uint8*, mlen: int64, ad: uint8*, adlen: int64, nonce: CrNonce24*, key: CrKey32*) -> int32 {
   if (ct_len == 0) { return CR_E_ARG; }
@@ -76,14 +124,15 @@ export fn cr_aead_encrypt(ct: uint8*, ct_cap: int64, ct_len: int64*, msg: uint8*
   if ((msg == 0 && mlen > 0) || (ad == 0 && adlen > 0)) { return CR_E_ARG; }
   if (ct_cap - CR_AEAD_TAG_BYTES < mlen) { return CR_E_SPACE; }
   if (cr_init() != CR_OK) { return CR_E_INIT; }
-  var clen: uint64 = 0;
-  var rc: int32 = crypto_aead_xchacha20poly1305_ietf_encrypt(ct, &clen, cr_aead_ptr(msg, mlen), (uint64)mlen,
-    cr_aead_ptr(ad, adlen), (uint64)adlen, 0, &nonce->b[0], &key->b[0]);
-  if (rc != 0) {
-    cr_wipe(ct, ct_cap);
-    return CR_E_INTERNAL;
-  }
-  *ct_len = (int64)clen;
+  var sub: uint8[32];
+  var n12: uint8[12];
+  var otk: uint8[32];
+  cr_aead_derive(&key->b[0], &nonce->b[0], &sub[0], &n12[0], &otk[0]);
+  crx_chacha20_xor(ct, cr_aead_ptr(msg, mlen), mlen, &sub[0], &n12[0], 1);
+  cr_aead_mac(&ct[mlen], &otk[0], cr_aead_ptr(ad, adlen), adlen, ct, mlen);
+  cr_wipe(&sub[0], 32);
+  cr_wipe(&otk[0], 32);
+  *ct_len = mlen + CR_AEAD_TAG_BYTES;
   return CR_OK;
 }
 
@@ -95,12 +144,12 @@ export fn cr_aead_encrypt(ct: uint8*, ct_cap: int64, ct_len: int64*, msg: uint8*
 /// returns: CR_OK and *pt_len = clen - 16; CR_E_VERIFY if the tag does not
 ///   match (wrong key, nonce or ad, tampered or truncated ciphertext,
 ///   clen < 16); CR_E_ARG; CR_E_SPACE; CR_E_INIT. On every failure
-///   *pt_len = 0 and the first pt_cap bytes of pt are wiped (sodium_memzero),
+///   *pt_len = 0 and the first pt_cap bytes of pt are wiped (cr_wipe),
 ///   so no unauthenticated plaintext ever reaches the caller (when
 ///   decrypting in place, pt == ct, that also wipes the ciphertext)
 /// owns: nothing; the caller owns every buffer and must wipe the plaintext
 ///   when done
-/// thread: main thread only
+/// thread: any thread (no shared state)
 /// example: if (cr_aead_decrypt(&pt[0], 64, &plen, &ct[0], clen, 0, 0, &nonce, &k) != CR_OK) { reject(); }
 export fn cr_aead_decrypt(pt: uint8*, pt_cap: int64, pt_len: int64*, ct: uint8*, clen: int64, ad: uint8*, adlen: int64, nonce: CrNonce24*, key: CrKey32*) -> int32 {
   if (pt_len == 0) { return CR_E_ARG; }
@@ -122,13 +171,23 @@ export fn cr_aead_decrypt(pt: uint8*, pt_cap: int64, pt_len: int64*, ct: uint8*,
     cr_wipe(pt, pt_cap);
     return CR_E_INIT;
   }
-  var mlen: uint64 = 0;
-  var rc: int32 = crypto_aead_xchacha20poly1305_ietf_decrypt(pt, &mlen, 0, ct, (uint64)clen,
-    cr_aead_ptr(ad, adlen), (uint64)adlen, &nonce->b[0], &key->b[0]);
-  if (rc != 0) {
+  var mlen: int64 = clen - CR_AEAD_TAG_BYTES;
+  var sub: uint8[32];
+  var n12: uint8[12];
+  var otk: uint8[32];
+  var tag: uint8[16];
+  cr_aead_derive(&key->b[0], &nonce->b[0], &sub[0], &n12[0], &otk[0]);
+  cr_aead_mac(&tag[0], &otk[0], cr_aead_ptr(ad, adlen), adlen, ct, mlen);
+  var ok: bool = cr_equal(&tag[0], &ct[mlen], 16);
+  cr_wipe(&tag[0], 16);
+  cr_wipe(&otk[0], 32);
+  if (!ok) {
+    cr_wipe(&sub[0], 32);
     cr_wipe(pt, pt_cap);
     return CR_E_VERIFY;
   }
-  *pt_len = (int64)mlen;
+  crx_chacha20_xor(pt, ct, mlen, &sub[0], &n12[0], 1);
+  cr_wipe(&sub[0], 32);
+  *pt_len = mlen;
   return CR_OK;
 }

@@ -1,0 +1,58 @@
+// XChaCha20-Poly1305: every libsodium-generated row of vec_aead.mettle
+// (key | nonce | ad | msg | ct||tag): encrypt matches, decrypt round-trips,
+// and a flipped bit in the ciphertext or the tag gives CR_E_VERIFY with the
+// output wiped.
+import "crypto/crypto";
+import "tcheck";
+import "vec_aead";
+
+fn main() -> int32 {
+  var key: CrKey32;
+  var nonce: CrNonce24;
+  var ad: uint8[96];
+  var msg: uint8[1264];
+  var want: uint8[1264];
+  var ct: uint8[1264];
+  var pt: uint8[1264];
+  var r: int32 = 0;
+  while (r < VEC_AEAD_N) {
+    var row: string = VEC_AEAD[r];
+    tc_unhex(tc_field(row, 0), &key.b[0], 32);
+    tc_unhex(tc_field(row, 1), &nonce.b[0], 24);
+    var adlen: int64 = tc_unhex(tc_field(row, 2), &ad[0], 96);
+    var mlen: int64 = tc_unhex(tc_field(row, 3), &msg[0], 1264);
+    var wlen: int64 = tc_unhex(tc_field(row, 4), &want[0], 1264);
+    tc_ok("row {r}: lengths", adlen >= 0 && mlen >= 0 && wlen == mlen + 16);
+
+    var clen: int64 = 0;
+    tc_rc("row {r}: encrypt", cr_aead_encrypt(&ct[0], 1264, &clen, &msg[0], mlen, &ad[0], adlen, &nonce, &key), CR_OK);
+    tc_ok("row {r}: ciphertext", clen == wlen && cr_equal(&ct[0], &want[0], wlen));
+
+    var plen: int64 = 0;
+    tc_rc("row {r}: decrypt", cr_aead_decrypt(&pt[0], 1264, &plen, &want[0], wlen, &ad[0], adlen, &nonce, &key), CR_OK);
+    tc_ok("row {r}: plaintext", plen == mlen && cr_equal(&pt[0], &msg[0], mlen));
+
+    // Flip one bit: in the tag for every row, and in the ciphertext when
+    // there is any.
+    var bit: uint8 = (uint8)(1 << (r % 8));
+    var k: int32 = 0;
+    while (k < 2) {
+      var pos: int64 = wlen - 1 - (int64)(r % 16);
+      if (k == 1) {
+        pos = 0;
+        if (mlen > 0) { pos = ((int64)r * 7) % mlen; }
+      }
+      if (k == 0 || mlen > 0) {
+        want[pos] = want[pos] ^ bit;
+        tc_fill(&pt[0], 1264, 255);
+        plen = 99;
+        tc_rc("row {r}: tampered {k}", cr_aead_decrypt(&pt[0], 1264, &plen, &want[0], wlen, &ad[0], adlen, &nonce, &key), CR_E_VERIFY);
+        tc_ok("row {r}: tampered {k} wiped", plen == 0 && tc_all_zero(&pt[0], 1264));
+        want[pos] = want[pos] ^ bit;
+      }
+      k = k + 1;
+    }
+    r = r + 1;
+  }
+  return tc_finish("aead_vec");
+}
