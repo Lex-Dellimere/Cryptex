@@ -1,0 +1,139 @@
+// Argon2id against libsodium-generated vectors (tests/vec_pwhash.mettle):
+//   raw|pw|salt|ops(hex)|mem(hex, bytes)|expected  -> crx_argon2id
+//   str|pw|text(hex of the ASCII string)           -> cr_pwhash_verify and
+//                                                     cr_pwhash_needs_rehash
+// plus a cr_pwhash_str round trip and the format of the string it writes.
+import "std/mem";
+import "crypto/crypto";
+import "crypto/argon2";
+import "tcheck";
+import "vec_pwhash";
+
+fn hex_u32(h: string) -> uint32 {
+  var v: uint32 = 0;
+  for i in 0..h.length {
+    var c: uint32 = (uint32)h.chars[i];
+    if (c >= 97) { c = c - 87; } else { c = c - 48; }
+    v = v * 16 + c;
+  }
+  return v;
+}
+
+fn check_raw(label: string, row: string) {
+  var pw: uint8[64];
+  var salt: uint8[64];
+  var want: uint8[64];
+  var out: uint8[64];
+  var pn: int64 = tc_unhex(tc_field(row, 1), &pw[0], 64);
+  var sn: int64 = tc_unhex(tc_field(row, 2), &salt[0], 64);
+  var wn: int64 = tc_unhex(tc_field(row, 5), &want[0], 64);
+  tc_ok(label + " parse", pn >= 0 && sn >= 0 && wn >= 4);
+  var ops: uint32 = hex_u32(tc_field(row, 3));
+  var mem: uint32 = hex_u32(tc_field(row, 4));
+  tc_fill(&out[0], 64, 0);
+  tc_rc(label + " rc", crx_argon2id(&out[0], wn, &pw[0], pn, &salt[0], sn, ops, mem / 1024), CR_OK);
+  tc_hex_eq(label, &out[0], wn, tc_field(row, 5));
+}
+
+fn flip(h: CrPwHash*, at: int64) {
+  if (h->b[at] == 65) { h->b[at] = 66; } else { h->b[at] = 65; }
+}
+
+fn check_str(label: string, row: string) {
+  var pw: uint8[64];
+  var pn: int64 = tc_unhex(tc_field(row, 1), &pw[0], 64);
+  var tb: uint8[128];
+  var tn: int64 = tc_unhex(tc_field(row, 2), &tb[0], 127);
+  tc_ok(label + " parse", pn >= 0 && tn > 0);
+  var h: CrPwHash;
+  tc_rc(label + " from_text", cr_pwhash_from_text(&h, str_from_bytes((cstring)&tb[0], tn)), CR_OK);
+  tc_ok(label + " verify", cr_pwhash_verify(&h, &pw[0], pn));
+  tc_ok(label + " needs rehash (m=1 MiB)", cr_pwhash_needs_rehash(&h, CR_PW_INTERACTIVE));
+  // One byte of the password changed (or a byte added to an empty one).
+  var pw2: uint8[64];
+  for i in 0..64 { pw2[i] = pw[i]; }
+  var pn2: int64 = pn;
+  if (pn > 0) { pw2[0] = pw2[0] ^ 1; } else { pn2 = 1; }
+  tc_ok(label + " wrong pw", !cr_pwhash_verify(&h, &pw2[0], pn2));
+  // One character of the hash part changed.
+  var h2: CrPwHash;
+  cr_pwhash_from_text(&h2, str_from_bytes((cstring)&tb[0], tn));
+  flip(&h2, tn - 2);
+  tc_ok(label + " tampered hash", !cr_pwhash_verify(&h2, &pw[0], pn));
+  // And one of the salt part.
+  var h3: CrPwHash;
+  cr_pwhash_from_text(&h3, str_from_bytes((cstring)&tb[0], tn));
+  flip(&h3, 36);
+  tc_ok(label + " tampered salt", !cr_pwhash_verify(&h3, &pw[0], pn));
+}
+
+fn main() -> int32 {
+  for i in 0..VEC_PWHASH_N {
+    var row: string = VEC_PWHASH[i];
+    var kind: string = tc_field(row, 0);
+    if (kind == "raw") {
+      check_raw("raw row {i}", row);
+    } else {
+      check_str("str row {i}", row);
+    }
+  }
+
+  // Argument checks.
+  var o: uint8[32];
+  var s: uint8[16];
+  var p: uint8[4];
+  tc_fill(&s[0], 16, 7);
+  tc_rc("short salt", crx_argon2id(&o[0], 32, &p[0], 4, &s[0], 7, 1, 8), CR_E_ARG);
+  tc_rc("short tag", crx_argon2id(&o[0], 3, &p[0], 4, &s[0], 16, 1, 8), CR_E_ARG);
+  tc_rc("zero passes", crx_argon2id(&o[0], 32, &p[0], 4, &s[0], 16, 0, 8), CR_E_ARG);
+  tc_rc("tiny memory", crx_argon2id(&o[0], 32, &p[0], 4, &s[0], 16, 1, 7), CR_E_ARG);
+  tc_rc("null out", crx_argon2id(0, 32, &p[0], 4, &s[0], 16, 1, 8), CR_E_ARG);
+  tc_rc("null pw", crx_argon2id(&o[0], 32, 0, 4, &s[0], 16, 1, 8), CR_E_ARG);
+  tc_rc("null salt", crx_argon2id(&o[0], 32, &p[0], 4, 0, 16, 1, 8), CR_E_ARG);
+  // m = 11 uses 8 blocks like m = 8, but m is part of H0, so tags differ.
+  var a: uint8[32];
+  var b: uint8[32];
+  tc_rc("m=8", crx_argon2id(&a[0], 32, &p[0], 4, &s[0], 16, 1, 8), CR_OK);
+  tc_rc("m=11", crx_argon2id(&b[0], 32, &p[0], 4, &s[0], 16, 1, 11), CR_OK);
+  tc_ok("m is hashed", !cr_equal(&a[0], &b[0], 32));
+
+  // Strings that must be refused without doing the work they ask for.
+  var bad: CrPwHash;
+  var salt22: string = "D8+XijbAQyRuOIIeCX8Jqg";
+  var hash43: string = "pjcIIU0d6tcRPN3Sdq0AEMz30AruhJznMkRFonS6Juk";
+  var good: string = "$argon2id$v=19$m=8,t=1,p=1$" + salt22 + "$" + hash43;
+  tc_rc("good from_text", cr_pwhash_from_text(&bad, good), CR_OK);
+  tc_ok("good parses (wrong pw still false)", !cr_pwhash_verify(&bad, &p[0], 4));
+  tc_ok("good needs rehash", cr_pwhash_needs_rehash(&bad, CR_PW_INTERACTIVE));
+  var cases: string[10] = [
+    "$argon2id$v=19$m=4194305,t=1,p=1$" + salt22 + "$" + hash43,
+    "$argon2id$v=19$m=99999999999,t=1,p=1$" + salt22 + "$" + hash43,
+    "$argon2id$v=19$m=8,t=65,p=1$" + salt22 + "$" + hash43,
+    "$argon2id$v=19$m=8,t=1,p=2$" + salt22 + "$" + hash43,
+    "$argon2id$v=18$m=8,t=1,p=1$" + salt22 + "$" + hash43,
+    "$argon2i$v=19$m=8,t=1,p=1$" + salt22 + "$" + hash43,
+    "$argon2id$v=19$m=08,t=1,p=1$" + salt22 + "$" + hash43,
+    "$argon2id$v=19$m=8,t=1,p=1$" + salt22 + "=$" + hash43,
+    "$argon2id$v=19$m=8,t=1,p=1$D8+Xij$" + hash43,
+    "$argon2id$v=19$m=7,t=1,p=1$" + salt22 + "$" + hash43
+  ];
+  for i in 0..10 {
+    cr_pwhash_from_text(&bad, cases[i]);
+    tc_ok("refused string {i}", !cr_pwhash_verify(&bad, &p[0], 4));
+    tc_ok("refused string {i} needs rehash", cr_pwhash_needs_rehash(&bad, CR_PW_INTERACTIVE));
+  }
+
+  // cr_pwhash_str round trip and string format.
+  var pw: string = "correct horse battery staple";
+  var h: CrPwHash;
+  tc_rc("str interactive", cr_pwhash_str(&h, pw.chars, (int64)pw.length, CR_PW_INTERACTIVE), CR_OK);
+  var text: string = cr_pwhash_text(&h);
+  var pre: string = "$argon2id$v=19$m=65536,t=2,p=1$";
+  var pre_ok: bool = text.length == 31 + 22 + 1 + 43;
+  for i in 0..pre.length { if (text.chars[i] != pre.chars[i]) { pre_ok = false; } }
+  tc_ok("string format", pre_ok);
+  tc_ok("string verifies", cr_pwhash_verify(&h, pw.chars, (int64)pw.length));
+  tc_ok("no rehash at interactive", !cr_pwhash_needs_rehash(&h, CR_PW_INTERACTIVE));
+  tc_ok("rehash at moderate", cr_pwhash_needs_rehash(&h, CR_PW_MODERATE));
+  return tc_finish("argon2_vec");
+}
