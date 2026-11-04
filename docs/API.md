@@ -637,6 +637,210 @@ Computes BLAKE2b (RFC 7693), optionally keyed (then it is a MAC/PRF), with a cho
 var d: uint8[32]; cr_blake2b(&d[0], 32, s.chars, (int64)s.length, 0, 0);
 ```
 
+### CrSha256State
+
+```mettle
+export struct CrSha256State {
+  s: CrxSha256;
+}
+```
+
+Streaming SHA-256 state. Treat as opaque: only cr_sha256_init, _update and _final touch it. The caller provides the memory.
+
+- **owns:** the caller owns the state; _final wipes it; to abandon a hash early wipe it with cr_wipe(st, 112)
+- **thread:** any thread (no shared state); one thread per state
+
+```mettle
+var st: CrSha256State; cr_sha256_init(&st);
+```
+
+### CrSha512State
+
+```mettle
+export struct CrSha512State {
+  s: CrxSha512;
+}
+```
+
+Streaming SHA-512 state. Treat as opaque: only cr_sha512_init, _update and _final touch it. The caller provides the memory.
+
+- **owns:** the caller owns the state; _final wipes it; to abandon a hash early wipe it with cr_wipe(st, 208)
+- **thread:** any thread (no shared state); one thread per state
+
+```mettle
+var st: CrSha512State; cr_sha512_init(&st);
+```
+
+### CrBlake2bState
+
+```mettle
+export struct CrBlake2bState {
+  s: CrxBlake2b;
+}
+```
+
+Streaming BLAKE2b state. Treat as opaque: only cr_blake2b_init, _update and _final touch it. The caller provides the memory.
+
+- **owns:** the caller owns the state; _final wipes it; to abandon a hash early wipe it with cr_wipe(st, 224). A keyed state holds the key: wipe or finish it
+- **thread:** any thread (no shared state); one thread per state
+
+```mettle
+var st: CrBlake2bState; cr_blake2b_init(&st, 32, 0, 0);
+```
+
+### cr_sha256_init
+
+```mettle
+export fn cr_sha256_init(st: CrSha256State*) -> int32
+```
+
+Starts a streaming SHA-256 hash (FIPS 180-4). Feed data with cr_sha256_update, finish with cr_sha256_final.
+
+- **in:** st writable state
+- **returns:** CR_OK; CR_E_ARG (null st)
+- **owns:** the caller owns st; _final wipes it, or abandon it with cr_wipe(st, 112)
+- **thread:** any thread (no shared state)
+
+```mettle
+var st: CrSha256State; cr_sha256_init(&st);
+```
+
+### cr_sha256_update
+
+```mettle
+export fn cr_sha256_update(st: CrSha256State*, msg: uint8*, n: int64) -> int32
+```
+
+Feeds n bytes into a streaming SHA-256 hash. Any split of the input gives the same digest as cr_sha256 over the whole.
+
+- **in:** st initialised by cr_sha256_init; msg readable for n bytes (may be 0 when n == 0); n >= 0
+- **returns:** CR_OK; CR_E_ARG (null st, null msg with n > 0, n < 0). On error the state is unchanged
+- **owns:** the caller owns st and msg
+- **thread:** any thread (no shared state)
+
+```mettle
+cr_sha256_update(&st, buf, (int64)got);
+```
+
+### cr_sha256_final
+
+```mettle
+export fn cr_sha256_final(st: CrSha256State*, out: CrSha256*) -> int32
+```
+
+Finishes a streaming SHA-256 hash and writes the digest. Always wipes st, also on error.
+
+- **in:** st initialised by cr_sha256_init; out writable
+- **returns:** CR_OK; CR_E_ARG (null st or out). With a null out and a non-null st the state is wiped and nothing is written
+- **owns:** the caller owns st and out; st is wiped
+- **thread:** any thread (no shared state)
+
+```mettle
+var d: CrSha256; cr_sha256_final(&st, &d);
+```
+
+### cr_sha512_init
+
+```mettle
+export fn cr_sha512_init(st: CrSha512State*) -> int32
+```
+
+Starts a streaming SHA-512 hash (FIPS 180-4). Feed data with cr_sha512_update, finish with cr_sha512_final.
+
+- **in:** st writable state
+- **returns:** CR_OK; CR_E_ARG (null st)
+- **owns:** the caller owns st; _final wipes it, or abandon it with cr_wipe(st, 208)
+- **thread:** any thread (no shared state)
+
+```mettle
+var st: CrSha512State; cr_sha512_init(&st);
+```
+
+### cr_sha512_update
+
+```mettle
+export fn cr_sha512_update(st: CrSha512State*, msg: uint8*, n: int64) -> int32
+```
+
+Feeds n bytes into a streaming SHA-512 hash. Any split of the input gives the same digest as cr_sha512 over the whole.
+
+- **in:** st initialised by cr_sha512_init; msg readable for n bytes (may be 0 when n == 0); n >= 0
+- **returns:** CR_OK; CR_E_ARG (null st, null msg with n > 0, n < 0). On error the state is unchanged
+- **owns:** the caller owns st and msg
+- **thread:** any thread (no shared state)
+
+```mettle
+cr_sha512_update(&st, buf, (int64)got);
+```
+
+### cr_sha512_final
+
+```mettle
+export fn cr_sha512_final(st: CrSha512State*, out: CrSha512*) -> int32
+```
+
+Finishes a streaming SHA-512 hash and writes the digest. Always wipes st, also on error.
+
+- **in:** st initialised by cr_sha512_init; out writable
+- **returns:** CR_OK; CR_E_ARG (null st or out). With a null out and a non-null st the state is wiped and nothing is written
+- **owns:** the caller owns st and out; st is wiped
+- **thread:** any thread (no shared state)
+
+```mettle
+var d: CrSha512; cr_sha512_final(&st, &d);
+```
+
+### cr_blake2b_init
+
+```mettle
+export fn cr_blake2b_init(st: CrBlake2bState*, outlen: int64, key: uint8*, keylen: int64) -> int32
+```
+
+Starts a streaming BLAKE2b hash (RFC 7693), optionally keyed, with a chosen output length. Same length rules as cr_blake2b.
+
+- **in:** st writable state; outlen in [16, 64]; key readable for keylen bytes, keylen 0 (unkeyed; key may be 0) or in [16, 64]
+- **returns:** CR_OK; CR_E_ARG (null st, outlen or keylen out of range, null key with keylen > 0). On error st is wiped so a later _final fails too
+- **owns:** the caller owns st and key (wipe the key yourself); st holds a copy of the key until _final wipes it, or abandon it with cr_wipe(st, 224)
+- **thread:** any thread (no shared state)
+
+```mettle
+var st: CrBlake2bState; cr_blake2b_init(&st, 32, 0, 0);
+```
+
+### cr_blake2b_update
+
+```mettle
+export fn cr_blake2b_update(st: CrBlake2bState*, msg: uint8*, n: int64) -> int32
+```
+
+Feeds n bytes into a streaming BLAKE2b hash. Any split of the input gives the same digest as cr_blake2b over the whole.
+
+- **in:** st initialised by cr_blake2b_init; msg readable for n bytes (may be 0 when n == 0); n >= 0
+- **returns:** CR_OK; CR_E_ARG (null st, null msg with n > 0, n < 0). On error the state is unchanged
+- **owns:** the caller owns st and msg
+- **thread:** any thread (no shared state)
+
+```mettle
+cr_blake2b_update(&st, buf, (int64)got);
+```
+
+### cr_blake2b_final
+
+```mettle
+export fn cr_blake2b_final(st: CrBlake2bState*, out: uint8*, outlen: int64) -> int32
+```
+
+Finishes a streaming BLAKE2b hash and writes the digest. Always wipes st, also on error.
+
+- **in:** st initialised by cr_blake2b_init; out writable for outlen bytes; outlen equal to the outlen given to cr_blake2b_init
+- **returns:** CR_OK; CR_E_ARG (null st or out, outlen different from the init outlen). On error st is wiped and out is not written
+- **owns:** the caller owns st and out; st is wiped
+- **thread:** any thread (no shared state)
+
+```mettle
+var d: uint8[32]; cr_blake2b_final(&st, &d[0], 32);
+```
+
 ## mac
 
 HMAC-SHA256 and HMAC-SHA512 (RFC 2104, FIPS 198-1) with keys of any length, in pure Mettle on top of sha2. The state keeps two running hashes (inner, outer) that were primed with the key pads, so no key copy stays around. Verification is constant time (cr_equal).

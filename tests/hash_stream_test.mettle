@@ -1,0 +1,187 @@
+// Streaming SHA-256, SHA-512 and BLAKE2b through the public API
+// (cr_<hash>_init/_update/_final), against the libsodium-generated vectors:
+// tests/vec_hash.mettle (msg|sha256|sha512|blake2b-512) and
+// tests/vec_blake2b.mettle (msg|key|outlen hex|expected). Every message is
+// fed in pieces of 1, 7, 64 and 1000 bytes and as one piece; the state must
+// be all zero after _final; argument errors are checked at the end.
+import "crypto/crypto";
+import "tcheck";
+import "vec_hash";
+import "vec_blake2b";
+
+fn piece(k: int32, n: int64) -> int64 {
+  if (k == 0) { return 1; }
+  if (k == 1) { return 7; }
+  if (k == 2) { return 64; }
+  if (k == 3) { return 1000; }
+  if (n < 1) { return 1; }
+  return n;
+}
+
+fn sha256_row(label: string, msg: uint8*, n: int64, want: string) {
+  for k in 0..5 {
+    var st: CrSha256State;
+    var d: CrSha256;
+    var step: int64 = piece(k, n);
+    tc_rc(label + " init", cr_sha256_init(&st), CR_OK);
+    var i: int64 = 0;
+    while (i < n) {
+      var take: int64 = n - i;
+      if (take > step) { take = step; }
+      tc_rc(label + " update", cr_sha256_update(&st, &msg[i], take), CR_OK);
+      i = i + take;
+    }
+    tc_rc(label + " update 0", cr_sha256_update(&st, msg, 0), CR_OK);
+    tc_rc(label + " update null 0", cr_sha256_update(&st, 0, 0), CR_OK);
+    tc_rc(label + " final", cr_sha256_final(&st, &d), CR_OK);
+    tc_hex_eq(label + " piece {step}", &d.b[0], 32, want);
+    tc_ok(label + " state wiped", tc_all_zero((uint8*)&st, 112));
+  }
+}
+
+fn sha512_row(label: string, msg: uint8*, n: int64, want: string) {
+  for k in 0..5 {
+    var st: CrSha512State;
+    var d: CrSha512;
+    var step: int64 = piece(k, n);
+    tc_rc(label + " init", cr_sha512_init(&st), CR_OK);
+    var i: int64 = 0;
+    while (i < n) {
+      var take: int64 = n - i;
+      if (take > step) { take = step; }
+      tc_rc(label + " update", cr_sha512_update(&st, &msg[i], take), CR_OK);
+      i = i + take;
+    }
+    tc_rc(label + " update 0", cr_sha512_update(&st, msg, 0), CR_OK);
+    tc_rc(label + " update null 0", cr_sha512_update(&st, 0, 0), CR_OK);
+    tc_rc(label + " final", cr_sha512_final(&st, &d), CR_OK);
+    tc_hex_eq(label + " piece {step}", &d.b[0], 64, want);
+    tc_ok(label + " state wiped", tc_all_zero((uint8*)&st, 208));
+  }
+}
+
+fn blake2b_row(label: string, msg: uint8*, n: int64, key: uint8*, keylen: int64, outlen: int64, want: string) {
+  var bad: bool = outlen < CR_BLAKE2B_MIN || outlen > CR_BLAKE2B_MAX;
+  if (keylen != 0 && (keylen < CR_BLAKE2B_KEY_MIN || keylen > CR_BLAKE2B_MAX)) { bad = true; }
+  if (bad) {
+    var st: CrBlake2bState;
+    tc_fill((uint8*)&st, 224, 0x5a);
+    tc_rc(label + " init rejects", cr_blake2b_init(&st, outlen, key, keylen), CR_E_ARG);
+    tc_ok(label + " rejected state wiped", tc_all_zero((uint8*)&st, 224));
+    return;
+  }
+  for k in 0..5 {
+    var st: CrBlake2bState;
+    var d: uint8[64];
+    var step: int64 = piece(k, n);
+    tc_fill(&d[0], 64, 0);
+    tc_rc(label + " init", cr_blake2b_init(&st, outlen, key, keylen), CR_OK);
+    var i: int64 = 0;
+    while (i < n) {
+      var take: int64 = n - i;
+      if (take > step) { take = step; }
+      tc_rc(label + " update", cr_blake2b_update(&st, &msg[i], take), CR_OK);
+      i = i + take;
+    }
+    tc_rc(label + " update 0", cr_blake2b_update(&st, msg, 0), CR_OK);
+    tc_rc(label + " update null 0", cr_blake2b_update(&st, 0, 0), CR_OK);
+    tc_rc(label + " final", cr_blake2b_final(&st, &d[0], outlen), CR_OK);
+    tc_hex_eq(label + " piece {step}", &d[0], outlen, want);
+    tc_ok(label + " no overrun", tc_all_zero(&d[0] + outlen, 64 - outlen));
+    tc_ok(label + " state wiped", tc_all_zero((uint8*)&st, 224));
+  }
+}
+
+fn errors() {
+  var m: uint8[8];
+  var key: uint8[64];
+  tc_fill(&m[0], 8, 7);
+  tc_fill(&key[0], 64, 9);
+
+  // SHA-256
+  var s2: CrSha256State;
+  var d2: CrSha256;
+  tc_rc("sha256 init null", cr_sha256_init(0), CR_E_ARG);
+  tc_rc("sha256 init", cr_sha256_init(&s2), CR_OK);
+  tc_rc("sha256 update null st", cr_sha256_update(0, &m[0], 1), CR_E_ARG);
+  tc_rc("sha256 update null msg", cr_sha256_update(&s2, 0, 1), CR_E_ARG);
+  tc_rc("sha256 update neg", cr_sha256_update(&s2, &m[0], -1), CR_E_ARG);
+  tc_rc("sha256 final null st", cr_sha256_final(0, &d2), CR_E_ARG);
+  tc_fill(&d2.b[0], 32, 0);
+  tc_rc("sha256 final null out", cr_sha256_final(&s2, 0), CR_E_ARG);
+  tc_ok("sha256 null out: state wiped", tc_all_zero((uint8*)&s2, 112));
+  tc_ok("sha256 null out: out untouched", tc_all_zero(&d2.b[0], 32));
+
+  // SHA-512
+  var s5: CrSha512State;
+  var d5: CrSha512;
+  tc_rc("sha512 init null", cr_sha512_init(0), CR_E_ARG);
+  tc_rc("sha512 init", cr_sha512_init(&s5), CR_OK);
+  tc_rc("sha512 update null st", cr_sha512_update(0, &m[0], 1), CR_E_ARG);
+  tc_rc("sha512 update null msg", cr_sha512_update(&s5, 0, 1), CR_E_ARG);
+  tc_rc("sha512 update neg", cr_sha512_update(&s5, &m[0], -1), CR_E_ARG);
+  tc_rc("sha512 final null st", cr_sha512_final(0, &d5), CR_E_ARG);
+  tc_fill(&d5.b[0], 64, 0);
+  tc_rc("sha512 final null out", cr_sha512_final(&s5, 0), CR_E_ARG);
+  tc_ok("sha512 null out: state wiped", tc_all_zero((uint8*)&s5, 208));
+  tc_ok("sha512 null out: out untouched", tc_all_zero(&d5.b[0], 64));
+
+  // BLAKE2b
+  var sb: CrBlake2bState;
+  var db: uint8[64];
+  tc_rc("blake2b init null st", cr_blake2b_init(0, 32, 0, 0), CR_E_ARG);
+  tc_rc("blake2b init outlen 15", cr_blake2b_init(&sb, 15, 0, 0), CR_E_ARG);
+  tc_rc("blake2b init outlen 65", cr_blake2b_init(&sb, 65, 0, 0), CR_E_ARG);
+  tc_rc("blake2b init key 15", cr_blake2b_init(&sb, 32, &key[0], 15), CR_E_ARG);
+  tc_rc("blake2b init key 65", cr_blake2b_init(&sb, 32, &key[0], 65), CR_E_ARG);
+  tc_rc("blake2b init null key", cr_blake2b_init(&sb, 32, 0, 16), CR_E_ARG);
+  tc_rc("blake2b init", cr_blake2b_init(&sb, 32, &key[0], 16), CR_OK);
+  tc_rc("blake2b update null st", cr_blake2b_update(0, &m[0], 1), CR_E_ARG);
+  tc_rc("blake2b update null msg", cr_blake2b_update(&sb, 0, 1), CR_E_ARG);
+  tc_rc("blake2b update neg", cr_blake2b_update(&sb, &m[0], -1), CR_E_ARG);
+  tc_rc("blake2b final null st", cr_blake2b_final(0, &db[0], 32), CR_E_ARG);
+  tc_fill(&db[0], 64, 0);
+  tc_rc("blake2b final null out", cr_blake2b_final(&sb, 0, 32), CR_E_ARG);
+  tc_ok("blake2b null out: state wiped", tc_all_zero((uint8*)&sb, 224));
+
+  // A mismatched outlen at _final: E_ARG, state wiped, out untouched.
+  tc_rc("blake2b init 2", cr_blake2b_init(&sb, 32, &key[0], 16), CR_OK);
+  tc_rc("blake2b update 2", cr_blake2b_update(&sb, &m[0], 8), CR_OK);
+  tc_rc("blake2b final outlen 31", cr_blake2b_final(&sb, &db[0], 31), CR_E_ARG);
+  tc_ok("blake2b mismatch: state wiped", tc_all_zero((uint8*)&sb, 224));
+  tc_ok("blake2b mismatch: out untouched", tc_all_zero(&db[0], 64));
+  tc_rc("blake2b init 3", cr_blake2b_init(&sb, 32, 0, 0), CR_OK);
+  tc_rc("blake2b final outlen 64", cr_blake2b_final(&sb, &db[0], 64), CR_E_ARG);
+  tc_ok("blake2b mismatch 64: state wiped", tc_all_zero((uint8*)&sb, 224));
+  tc_ok("blake2b mismatch 64: out untouched", tc_all_zero(&db[0], 64));
+  // A failed init leaves a wiped state, so _final on it also fails.
+  tc_rc("blake2b init bad", cr_blake2b_init(&sb, 8, 0, 0), CR_E_ARG);
+  tc_rc("blake2b final after bad init", cr_blake2b_final(&sb, &db[0], 32), CR_E_ARG);
+  tc_ok("blake2b bad init: out untouched", tc_all_zero(&db[0], 64));
+}
+
+fn main() -> int32 {
+  var msg: uint8[3000];
+  var key: uint8[64];
+  for i in 0..VEC_HASH_N {
+    var row: string = VEC_HASH[i];
+    var n: int64 = tc_unhex(tc_field(row, 0), &msg[0], 3000);
+    tc_ok("hash row {i} parse", n >= 0);
+    sha256_row("hash row {i} sha256", &msg[0], n, tc_field(row, 1));
+    sha512_row("hash row {i} sha512", &msg[0], n, tc_field(row, 2));
+    blake2b_row("hash row {i} blake2b-512", &msg[0], n, 0, 0, 64, tc_field(row, 3));
+  }
+  for i in 0..VEC_BLAKE2B_N {
+    var row: string = VEC_BLAKE2B[i];
+    var ol: uint8[1];
+    var n: int64 = tc_unhex(tc_field(row, 0), &msg[0], 3000);
+    var kn: int64 = tc_unhex(tc_field(row, 1), &key[0], 64);
+    tc_unhex(tc_field(row, 2), &ol[0], 1);
+    tc_ok("blake2b row {i} parse", n >= 0 && kn >= 0);
+    var kp: uint8* = 0;
+    if (kn > 0) { kp = &key[0]; }
+    blake2b_row("blake2b row {i}", &msg[0], n, kp, kn, (int64)ol[0], tc_field(row, 3));
+  }
+  errors();
+  return tc_finish("hash_stream");
+}
