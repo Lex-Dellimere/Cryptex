@@ -1,107 +1,118 @@
-// Initialization, randomness, constant-time comparison and wiping.
-// Backend: libsodium (sodium_init, randombytes_*, sodium_memcmp,
-// sodium_memzero).
-//
-// Thread model for the whole library: libsodium is thread-safe once
-// initialized, but Mettle may only call foreign C code from the main thread
-// (threads Mettle starts install their own thread pointer, which libc's
-// errno and libsodium's lock do not recognize; see reports/001). Every
-// function in this library is therefore "main thread only".
+// Initialization (a no-op), randomness, constant-time comparison and wiping.
+// Pure Mettle: randomness comes from the Linux getrandom(2) system call
+// through the syscall built-in; there is no foreign code and no shared state,
+// so every function in this library may be called from any thread.
 
 import "status";
 
-extern fn sodium_init() -> int32 = "sodium_init";
-extern fn randombytes_buf(buf: uint8*, size: uint64) = "randombytes_buf";
-extern fn randombytes_uniform(upper_bound: uint32) -> uint32 = "randombytes_uniform";
-extern fn sodium_memcmp(b1: uint8*, b2: uint8*, len: uint64) -> int32 = "sodium_memcmp";
-extern fn sodium_memzero(pnt: uint8*, len: uint64) = "sodium_memzero";
+// Largest request getrandom(2) is asked for in one call (the kernel returns
+// at most 33554431 bytes per call anyway).
+const CR_RANDOM_CHUNK: int64 = 33554431;
 
-var g_cr_ready: int32 = 0;
-
-/// Initializes libsodium. Idempotent: the first call runs sodium_init, later
-/// calls return immediately. Every other cr_ function calls it for you, so an
-/// explicit call is only needed to fail early at program start.
+/// Kept for compatibility: there is nothing to initialize. Safe to call any
+/// number of times, from any thread.
 /// in: -
-/// returns: CR_OK, or CR_E_INIT if libsodium cannot initialize (no entropy
-///   source); then every other function fails with CR_E_INIT / false
+/// returns: CR_OK, always
 /// owns: nothing
-/// thread: main thread only (reports/001). sodium_init is itself
-///   thread-safe; the Mettle-side flag is a plain global
+/// thread: any thread (no shared state)
 /// example: if (cr_init() != CR_OK) { return 1; }
 export fn cr_init() -> int32 {
-  if (g_cr_ready == 1) { return CR_OK; }
-  var rc: int32 = sodium_init();
-  // 0 = initialized now, 1 = already initialized, -1 = failure.
-  if (rc == 0 || rc == 1) {
-    g_cr_ready = 1;
-    return CR_OK;
-  }
-  return CR_E_INIT;
+  return CR_OK;
 }
 
-/// Fills buf with n cryptographically secure random bytes (randombytes_buf,
-/// getrandom(2) on Linux).
+/// Fills buf with n cryptographically secure random bytes (the kernel's
+/// getrandom(2)).
 /// in: buf, writable for n bytes (may be 0 only when n == 0); n >= 0
-/// returns: CR_OK; CR_E_ARG for a null buf with n > 0 or n < 0; CR_E_INIT
+/// returns: CR_OK; CR_E_ARG for a null buf with n > 0 or n < 0;
+///   CR_E_INTERNAL if the kernel random source fails
 /// owns: nothing; the caller owns buf
-/// thread: main thread only
+/// thread: any thread (no shared state)
 /// example: var salt: uint8[16]; cr_random_bytes(&salt[0], 16);
 export fn cr_random_bytes(buf: uint8*, n: int64) -> int32 {
   if (n < 0) { return CR_E_ARG; }
   if (n == 0) { return CR_OK; }
   if (buf == 0) { return CR_E_ARG; }
-  if (cr_init() != CR_OK) { return CR_E_INIT; }
-  randombytes_buf(buf, (uint64)n);
+  var done: int64 = 0;
+  while (done < n) {
+    var want: int64 = n - done;
+    if (want > CR_RANDOM_CHUNK) { want = CR_RANDOM_CHUNK; }
+    // getrandom(buf, count, flags = 0)
+    var got: int64 = syscall(318, &buf[done], want, 0);
+    if (got == -4) { continue; }  // EINTR: try again
+    if (got <= 0) { return CR_E_INTERNAL; }
+    done = done + got;
+  }
   return CR_OK;
 }
 
 /// Picks a uniformly distributed random integer in [0, n) without modulo
-/// bias (randombytes_uniform).
+/// bias (rejection sampling).
 /// in: n >= 1, the exclusive upper bound; out, where the value goes
 /// returns: CR_OK; CR_E_ARG if n == 0 or out is null (out untouched);
-///   CR_E_INIT
+///   CR_E_INTERNAL if the kernel random source fails
 /// owns: nothing
-/// thread: main thread only
+/// thread: any thread (no shared state)
 /// example: var die: uint32; cr_random_u32_below(6, &die);  // 0..5
 export fn cr_random_u32_below(n: uint32, out: uint32*) -> int32 {
   if (out == 0 || n == 0) { return CR_E_ARG; }
-  if (cr_init() != CR_OK) { return CR_E_INIT; }
-  *out = randombytes_uniform(n);
+  // Values below min would make the result favour small residues; skip them.
+  // n is public, so % is fine here.
+  var min: uint32 = ((uint32)0 - n) % n;
+  var r: uint8[4];
+  while (true) {
+    var rc: int32 = cr_random_bytes(&r[0], 4);
+    if (rc != CR_OK) { return rc; }
+    var v: uint32 = (uint32)r[0] | ((uint32)r[1] << 8) | ((uint32)r[2] << 16) | ((uint32)r[3] << 24);
+    if (v >= min) {
+      *out = v % n;
+      return CR_OK;
+    }
+  }
   return CR_OK;
 }
 
-/// Compares two byte ranges in constant time (sodium_memcmp): the time
-/// depends on n only, never on the contents. Use it for every comparison of
-/// secrets, tags and tokens; never use == or mem_equal for those.
+/// Compares two byte ranges in constant time: the time depends on n only,
+/// never on the contents. Use it for every comparison of secrets, tags and
+/// tokens; never use == or mem_equal for those.
 /// in: a, b readable for n bytes; n >= 0
 /// returns: true only if all n bytes are equal; false otherwise, and false
-///   for invalid arguments (null pointer with n > 0, n < 0) or CR_E_INIT
+///   for invalid arguments (null pointer with n > 0, n < 0)
 /// owns: nothing
-/// thread: main thread only
+/// thread: any thread (no shared state)
 /// example: if (cr_equal(&got.b[0], &want.b[0], 32)) { accept(); }
 export fn cr_equal(a: uint8*, b: uint8*, n: int64) -> bool {
   if (n < 0) { return false; }
   if (n == 0) { return true; }
   if (a == 0 || b == 0) { return false; }
-  if (cr_init() != CR_OK) { return false; }
-  var rc: int32 = sodium_memcmp(a, b, (uint64)n);
-  return rc == 0;
+  // volatile: every access stays, so the loop cannot stop at the first
+  // difference.
+  var d: volatile uint8 = 0;
+  var i: int64 = 0;
+  while (i < n) {
+    d = d | (a[i] ^ b[i]);
+    i = i + 1;
+  }
+  return d == 0;
 }
 
 /// Overwrites n bytes with zeros in a way the optimizer cannot remove
-/// (sodium_memzero). Call it on every secret (keys, seeds, passwords,
+/// (volatile stores). Call it on every secret (keys, seeds, passwords,
 /// plaintexts, HMAC states) as soon as you are done with it, including on
 /// error paths: `defer cr_wipe(&k.b[0], 32);`.
 /// in: buf writable for n bytes; n >= 0
 /// returns: CR_OK; CR_E_ARG for a null buf with n > 0 or n < 0
 /// owns: nothing; the caller still owns (and frees) buf
-/// thread: main thread only
+/// thread: any thread (no shared state)
 /// example: var k: CrKey32; cr_aead_keygen(&k); defer cr_wipe(&k.b[0], 32);
 export fn cr_wipe(buf: uint8*, n: int64) -> int32 {
   if (n < 0) { return CR_E_ARG; }
   if (n == 0) { return CR_OK; }
   if (buf == 0) { return CR_E_ARG; }
-  // sodium_memzero needs no initialization.
-  sodium_memzero(buf, (uint64)n);
+  var p: volatile uint8* = (volatile uint8*)buf;
+  var i: int64 = 0;
+  while (i < n) {
+    p[i] = 0;
+    i = i + 1;
+  }
   return CR_OK;
 }

@@ -1,0 +1,58 @@
+// hex and base64url against libsodium-generated vectors (tests/vec_encode.mettle):
+// each row is bytes|base64url text (as hex of its ASCII). Checks encode,
+// decode back to the bytes, and the hex encode/decode round trip.
+import "crypto/crypto";
+import "tcheck";
+import "vec_encode";
+
+fn main() -> int32 {
+  var all_ok: bool = true;
+  var rows: int32 = 0;
+  for r in 0..VEC_ENCODE_N {
+    var row: string = VEC_ENCODE[r];
+    var hexs: string = tc_field(row, 0);
+    var tx: string = tc_field(row, 1);
+    var raw: uint8[400];
+    var rn: int64 = tc_unhex(hexs, &raw[0], 400);
+    var text: uint8[600];
+    var tn: int64 = tc_unhex(tx, &text[0], 600);
+    if (rn < 0 || tn < 0) {
+      tc_ok("row {r} parse", false);
+      continue;
+    }
+    rows = rows + 1;
+
+    // base64url encode == vector text
+    var enc: uint8[600];
+    var en: int64 = 0;
+    var rc: int32 = cr_base64url_encode(&enc[0], 600, &en, &raw[0], rn);
+    if (rc != CR_OK || en != tn || !cr_equal(&enc[0], &text[0], tn) || enc[tn] != 0 || cr_base64url_encoded_cap(rn) != tn + 1) {
+      all_ok = false;
+      println("FAIL base64url encode row {r}");
+    }
+    // decode back
+    var dec: uint8[400];
+    var dn: int64 = 0;
+    rc = cr_base64url_decode(&dec[0], 400, &dn, &text[0], tn);
+    if (rc != CR_OK || dn != rn || !cr_equal(&dec[0], &raw[0], rn)) {
+      all_ok = false;
+      println("FAIL base64url decode row {r}");
+    }
+    // hex: encode equals field 0, decode returns the bytes
+    var hx: uint8[900];
+    var hn: int64 = 0;
+    rc = cr_hex_encode(&hx[0], 900, &hn, &raw[0], rn);
+    if (rc != CR_OK || hn != (int64)hexs.length || !cr_equal(&hx[0], hexs.chars, hn) || hx[hn] != 0) {
+      all_ok = false;
+      println("FAIL hex encode row {r}");
+    }
+    rc = cr_hex_decode(&dec[0], 400, &dn, &hx[0], hn);
+    if (rc != CR_OK || dn != rn || !cr_equal(&dec[0], &raw[0], rn)) {
+      all_ok = false;
+      println("FAIL hex decode row {r}");
+    }
+  }
+  tc_ok("all vector rows", all_ok);
+  tc_ok("row count", rows == VEC_ENCODE_N);
+  return tc_finish("encode_vec");
+}
