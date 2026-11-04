@@ -2,7 +2,7 @@
 
 Generated from the `///` contracts in `src/` by `tools/api_docs.py`. Do not edit by hand.
 
-Every function is **main thread only** (see reports/001) unless it says otherwise.
+Pure Mettle: no C, no shared state. Every function is safe on any thread.
 
 Primitives: [status](#status), [types](#types), [core](#core), [hash](#hash), [mac](#mac), [kdf](#kdf), [pwhash](#pwhash), [aead](#aead), [kx](#kx), [sign](#sign), [encode](#encode).
 Recipes: [signed](#signed), [token](#token), [seal](#seal), [totp](#totp).
