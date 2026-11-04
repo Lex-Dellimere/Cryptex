@@ -5,6 +5,7 @@ Safe crypto for Mettle, written in **pure Mettle**.
 No C, no shared libraries, no global state. Every function is safe on any thread. Randomness comes straight from the Linux `getrandom` system call.
 
 - **API reference:** [docs/API.md](docs/API.md)
+- **Standards and sources:** [docs/references.md](docs/references.md)
 
 > **Not audited yet.** The code follows the RFCs, matches libsodium byte for byte on thousands of test cases, and avoids secret-dependent branches by design. No outside party has reviewed it. Keep that in mind before you protect high-value data with it.
 
@@ -74,6 +75,8 @@ fn main() -> int32 {
 | Encryption for TLS | `cr_aes_gcm_init`, `_encrypt`, `_decrypt` | AES-128/256-GCM, FIPS 197 + NIST SP 800-38D |
 | Key exchange | `cr_x25519_*`, `cr_kx_*` | X25519, RFC 7748 |
 | Signatures | `cr_ed25519_*` | Ed25519, RFC 8032 |
+| NIST P-256 | `cr_p256_keypair`, `cr_p256_ecdh`, `cr_p256_ecdsa_sign`, `_verify` | FIPS 186-5, SEC 1, RFC 6979 |
+| RSA signatures | `cr_rsa_verify_pkcs1`, `cr_rsa_verify_pss` | RFC 8017 |
 | Encoding | `cr_hex_*`, `cr_base64url_*` | RFC 4648 |
 
 SHA-1 is inside, but only for TOTP. It is not offered on its own.
@@ -86,7 +89,8 @@ src/core/           status codes, types, random, compare, wipe, hex/base64url
 src/hash/           SHA-256, SHA-512, BLAKE2b (SHA-1 is internal, for TOTP)
 src/mac/            HMAC, HKDF
 src/cipher/         XChaCha20-Poly1305, ChaCha20-Poly1305
-src/ecc/            X25519 key exchange, Ed25519 signatures
+src/ecc/            X25519, Ed25519, P-256 (ECDH, ECDSA), big integers
+src/rsa/            RSA signature verification
 src/password/       Argon2id password hashing
 src/recipes/        signed values, tokens and codes, seal/open, TOTP
 tests/              test programs; test data in tests/vectors/

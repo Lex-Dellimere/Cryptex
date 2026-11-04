@@ -1,0 +1,533 @@
+// ECDSA on P-256 (FIPS 186-5, SEC 1 v2, RFC 6979): NIST CAVP SigVer rows
+// (tests/vectors/vec_cavp_ecdsa_256), Wycheproof rows (vec_wp_ecdsa_256_sha256,
+// vec_wp_ecdsa_256_sha512), the RFC 6979 appendix A.2.5 signatures, sign and
+// verify round trips with random keys, tampering, argument checks, strict DER,
+// and the DER, bits2int and raw routines the signature is built on.
+//
+// Row formats, hex fields joined by '|':
+//   cavp: hash | msg | public key | sig (DER) | v-or-i     hash is 256, 384, 512
+//   wp:   hash | public key | msg | sig (DER) | v-or-i     (key before message)
+// verify is true exactly for "v".
+import "crypto/core/status";
+import "crypto/core/types";
+import "crypto/core/util";
+import "crypto/ecc/i31";
+import "crypto/ecc/p256";
+import "crypto/ecc/ecdsa";
+import "crypto/hash/hash";
+import "std/time";
+import "tcheck";
+import "vectors/vec_cavp_ecdsa_256";
+import "vectors/vec_wp_ecdsa_256_sha256";
+import "vectors/vec_wp_ecdsa_256_sha512";
+
+const SIG_BUF: int64 = 4200;
+const MSG_BUF: int64 = 1024;
+
+fn hash_id(name: string) -> int32 {
+  if (name == "256") { return CR_HASH_SHA256; }
+  if (name == "384") { return CR_HASH_SHA384; }
+  if (name == "512") { return CR_HASH_SHA512; }
+  return 0;
+}
+
+fn cavp_rows() {
+  var msg: uint8[1024];
+  var pk: uint8[70];
+  var sig: uint8[4200];
+  var valid: int32 = 0;
+  for r in 0..VEC_CAVP_ECDSA_256_N {
+    var row: string = VEC_CAVP_ECDSA_256[r];
+    var label: string = "cavp row {r}";
+    var h: int32 = hash_id(tc_field(row, 0));
+    var ml: int64 = tc_unhex(tc_field(row, 1), &msg[0], MSG_BUF);
+    var pl: int64 = tc_unhex(tc_field(row, 2), &pk[0], 70);
+    var sl: int64 = tc_unhex(tc_field(row, 3), &sig[0], SIG_BUF);
+    var verdict: string = tc_field(row, 4);
+    tc_ok(label + " fields", h != 0 && ml >= 0 && pl == 65 && sl > 0);
+    var got: bool = cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], ml, h, &pk[0], pl);
+    tc_ok(label + " verdict " + verdict, got == (verdict == "v"));
+    if (verdict == "v") { valid = valid + 1; }
+  }
+  tc_ok("cavp has valid and invalid rows", valid > 0 && valid < VEC_CAVP_ECDSA_256_N);
+}
+
+fn wp_rows(rows: string*, count: int32, name: string) {
+  var msg: uint8[1024];
+  var pk: uint8[70];
+  var sig: uint8[4200];
+  var valid: int32 = 0;
+  for r in 0..count {
+    var row: string = rows[r];
+    var label: string = name + " row {r}";
+    var h: int32 = hash_id(tc_field(row, 0));
+    var pl: int64 = tc_unhex(tc_field(row, 1), &pk[0], 70);
+    var ml: int64 = tc_unhex(tc_field(row, 2), &msg[0], MSG_BUF);
+    var sl: int64 = tc_unhex(tc_field(row, 3), &sig[0], SIG_BUF);
+    var verdict: string = tc_field(row, 4);
+    tc_ok(label + " fields", h != 0 && ml >= 0 && pl >= 0 && sl >= 0);
+    var got: bool = cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], ml, h, &pk[0], pl);
+    tc_ok(label + " verdict " + verdict, got == (verdict == "v"));
+    if (verdict == "v") { valid = valid + 1; }
+  }
+  tc_ok(name + " has valid and invalid rows", valid > 0 && valid < count);
+}
+
+// RFC 6979 appendix A.2.5 (P-256).
+fn rfc6979() {
+  var sk: CrP256Secret;
+  var pk: uint8[65];
+  var sig: uint8[72];
+  var sl: int64 = 0;
+  tc_unhex("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721", &sk.b[0], 32);
+  tc_rc("rfc6979 public key", cr_p256_public_from_secret(&pk[0], 65, &sk), CR_OK);
+
+  var msgs: string[6] = ["sample", "sample", "sample", "test", "test", "test"];
+  var hashes: int32[6] = [CR_HASH_SHA256, CR_HASH_SHA384, CR_HASH_SHA512, CR_HASH_SHA256, CR_HASH_SHA384, CR_HASH_SHA512];
+  var want: string[6] = [
+    "3046022100efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716022100f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8",
+    "304402200eafea039b20e9b42309fb1d89e213057cbf973dc0cfc8f129edddc800ef771902204861f0491e6998b9455193e34e7b0d284ddd7149a74b95b9261f13abde940954",
+    "30450221008496a60b5e9b47c825488827e0495b0e3fa109ec4568fd3f8d1097678eb97f0002202362ab1adbe2b8adf9cb9edab740ea6049c028114f2460f96554f61fae3302fe",
+    "3045022100f1abb023518351cd71d881567b1ea663ed3efcf6c5132b354f28d3b0b7d383670220019f4113742a2b14bd25926b49c649155f267e60d3814b4c0cc84250e46f0083",
+    "304602210083910e8b48bb0c74244ebdf7f07a1c5413d61472bd941ef3920e623fbccebeb60221008ddbec54cf8cd5874883841d712142a56a8d0f218f5003cb0296b6b509619f2c",
+    "30440220461d93f31b6540894788fd206c07cfa0cc35f46fa3c91816fff1040ad1581a04022039af9f15de0db8d97e72719c74820d304ce5226e32dedae67519e840d1194e55"
+  ];
+  for i in 0..6 {
+    var label: string = "rfc6979 {msgs[i]} hash {hashes[i]}";
+    sl = -1;
+    tc_rc(label, cr_p256_ecdsa_sign(&sig[0], 72, &sl, msgs[i].chars, (int64)msgs[i].length, hashes[i], &sk), CR_OK);
+    tc_hex_eq(label + " signature", &sig[0], sl, want[i]);
+    tc_ok(label + " verifies", cr_p256_ecdsa_verify(&sig[0], sl, msgs[i].chars, (int64)msgs[i].length, hashes[i], &pk[0], 65));
+    // The same signature, with exactly the capacity it needs.
+    var again: uint8[72];
+    var sl2: int64 = 0;
+    tc_rc(label + " exact capacity", cr_p256_ecdsa_sign(&again[0], sl, &sl2, msgs[i].chars, (int64)msgs[i].length, hashes[i], &sk), CR_OK);
+    tc_ok(label + " deterministic", sl2 == sl && cr_equal(&again[0], &sig[0], sl));
+    // Another hash or another message does not verify.
+    var other: int32 = CR_HASH_SHA256;
+    if (hashes[i] == CR_HASH_SHA256) { other = CR_HASH_SHA512; }
+    tc_ok(label + " other hash fails", !cr_p256_ecdsa_verify(&sig[0], sl, msgs[i].chars, (int64)msgs[i].length, other, &pk[0], 65));
+  }
+  cr_wipe(&sk.b[0], 32);
+}
+
+fn tc_all_bytes(p: uint8*, n: int64, v: uint8) -> bool {
+  for i in 0..n {
+    if (p[i] != v) { return false; }
+  }
+  return true;
+}
+
+fn flip_msg(m: uint8*, n: int64, bit: int64) {
+  m[bit >> 3] = m[bit >> 3] ^ (uint8)(1 << (int32)(bit & 7));
+}
+
+// Random keys, all three hashes, empty and long messages, then tampering.
+fn round_trips() {
+  var hs: int32[3] = [CR_HASH_SHA256, CR_HASH_SHA384, CR_HASH_SHA512];
+  var long_msg: uint8[300];
+  for i in 0..300 { long_msg[i] = (uint8)(i * 7 + 3); }
+  for r in 0..6 {
+    var sk: CrP256Secret;
+    var pk: uint8[65];
+    var label: string = "round trip {r}";
+    tc_rc(label + " keypair", cr_p256_keypair(&pk[0], 65, &sk), CR_OK);
+    for j in 0..3 {
+      var h: int32 = hs[j];
+      var l2: string = label + " hash {h}";
+      var sig: uint8[72];
+      var sl: int64 = 0;
+      var msg: uint8[300];
+      var ml: int64 = (int64)((r * 61 + j * 37) % 300);
+      for i in 0..300 { msg[i] = long_msg[i]; }
+      tc_rc(l2 + " sign", cr_p256_ecdsa_sign(&sig[0], 72, &sl, &msg[0], ml, h, &sk), CR_OK);
+      tc_ok(l2 + " length", sl >= 8 && sl <= CR_P256_ECDSA_SIG_MAX);
+      tc_ok(l2 + " verifies", cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], ml, h, &pk[0], 65));
+
+      // Deterministic.
+      var sig2: uint8[72];
+      var sl2: int64 = 0;
+      cr_p256_ecdsa_sign(&sig2[0], 72, &sl2, &msg[0], ml, h, &sk);
+      tc_ok(l2 + " deterministic", sl2 == sl && cr_equal(&sig2[0], &sig[0], sl));
+
+      // A flipped bit in the message fails (every bit of up to 40 bytes).
+      if (ml > 0) {
+        var nbits: int64 = ml * 8;
+        if (nbits > 40) { nbits = 40; }
+        var bad: bool = false;
+        for b in 0..nbits {
+          flip_msg(&msg[0], ml, b);
+          if (cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], ml, h, &pk[0], 65)) { bad = true; }
+          flip_msg(&msg[0], ml, b);
+        }
+        tc_ok(l2 + " message bit flips fail", !bad);
+      }
+      // A shorter or longer message fails.
+      if (ml > 0) {
+        tc_ok(l2 + " truncated message fails", !cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], ml - 1, h, &pk[0], 65));
+      }
+      tc_ok(l2 + " extended message fails", !cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], ml + 1, h, &pk[0], 65));
+
+      // A flipped bit in the signature fails.
+      var badsig: bool = false;
+      for b in 0..(sl * 8) {
+        flip_msg(&sig[0], sl, b);
+        if (cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], ml, h, &pk[0], 65)) { badsig = true; }
+        flip_msg(&sig[0], sl, b);
+      }
+      tc_ok(l2 + " signature bit flips fail", !badsig);
+      tc_ok(l2 + " still verifies", cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], ml, h, &pk[0], 65));
+
+      // Another key fails.
+      var sk2: CrP256Secret;
+      var pk2: uint8[65];
+      cr_p256_keypair(&pk2[0], 65, &sk2);
+      tc_ok(l2 + " other key fails", !cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], ml, h, &pk2[0], 65));
+      cr_wipe(&sk2.b[0], 32);
+    }
+    cr_wipe(&sk.b[0], 32);
+  }
+}
+
+// n - s as a 32-byte big-endian number, for the "high s" twin of a signature.
+fn order_minus(out: uint8*, s: uint8*) {
+  var n: uint8[32];
+  crx_p256_order(&n[0]);
+  var borrow: int32 = 0;
+  var i: int32 = 31;
+  while (i >= 0) {
+    var d: int32 = (int32)n[i] - (int32)s[i] - borrow;
+    borrow = 0;
+    if (d < 0) { d = d + 256; borrow = 1; }
+    out[i] = (uint8)d;
+    i = i - 1;
+  }
+}
+
+fn der_from_raw(out: uint8*, r: uint8*, s: uint8*) -> int64 {
+  var raw: uint8[80];
+  for i in 0..32 { raw[i] = r[i]; raw[32 + i] = s[i]; }
+  var dl: int64 = crx_ecdsa_raw_to_asn1(&raw[0], 64);
+  for i in 0..dl { out[i] = raw[i]; }
+  return dl;
+}
+
+// Signatures that must or must not be accepted.
+fn signature_forms() {
+  var sk: CrP256Secret;
+  var pk: uint8[65];
+  var sig: uint8[72];
+  var sl: int64 = 0;
+  var msg: uint8[5];
+  msg[0] = (uint8)'h'; msg[1] = (uint8)'e'; msg[2] = (uint8)'l'; msg[3] = (uint8)'l'; msg[4] = (uint8)'o';
+  tc_unhex("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721", &sk.b[0], 32);
+  cr_p256_public_from_secret(&pk[0], 65, &sk);
+  cr_p256_ecdsa_sign(&sig[0], 72, &sl, &msg[0], 5, CR_HASH_SHA256, &sk);
+  tc_ok("form: base signature", cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], 5, CR_HASH_SHA256, &pk[0], 65));
+
+  // Raw r and s of the base signature.
+  var raw: uint8[80];
+  for i in 0..sl { raw[i] = sig[i]; }
+  var rl: int64 = crx_ecdsa_asn1_to_raw(&raw[0], sl);
+  tc_ok("form: atr gives 64 bytes", rl == 64);
+  var r: uint8[32];
+  var s: uint8[32];
+  for i in 0..32 { r[i] = raw[i]; s[i] = raw[32 + i]; }
+
+  // The high-s twin (r, n - s) is also a valid ECDSA signature.
+  var s2: uint8[32];
+  var tw: uint8[80];
+  order_minus(&s2[0], &s[0]);
+  var tl: int64 = der_from_raw(&tw[0], &r[0], &s2[0]);
+  tc_ok("form: twin signature verifies", cr_p256_ecdsa_verify(&tw[0], tl, &msg[0], 5, CR_HASH_SHA256, &pk[0], 65));
+
+  // Trailing byte, missing byte, wrong tag, long-form length, extra zero in r.
+  var t: uint8[80];
+  for i in 0..sl { t[i] = sig[i]; }
+  t[sl] = 0;
+  tc_ok("form: trailing byte fails", !cr_p256_ecdsa_verify(&t[0], sl + 1, &msg[0], 5, CR_HASH_SHA256, &pk[0], 65));
+  tc_ok("form: missing byte fails", !cr_p256_ecdsa_verify(&sig[0], sl - 1, &msg[0], 5, CR_HASH_SHA256, &pk[0], 65));
+  for i in 0..sl { t[i] = sig[i]; }
+  t[0] = 0x31;
+  tc_ok("form: SET tag fails", !cr_p256_ecdsa_verify(&t[0], sl, &msg[0], 5, CR_HASH_SHA256, &pk[0], 65));
+  t[0] = 0x30;
+  t[2] = 0x03;
+  tc_ok("form: wrong integer tag fails", !cr_p256_ecdsa_verify(&t[0], sl, &msg[0], 5, CR_HASH_SHA256, &pk[0], 65));
+
+  // 30 81 LL ...: a valid value in BER long form.
+  t[0] = 0x30;
+  t[1] = 0x81;
+  t[2] = (uint8)(sl - 2);
+  for i in 2..sl { t[i + 1] = sig[i]; }
+  tc_ok("form: long-form length fails", !cr_p256_ecdsa_verify(&t[0], sl + 1, &msg[0], 5, CR_HASH_SHA256, &pk[0], 65));
+
+  // An extra leading zero in the integer r (not minimal).
+  t[0] = 0x30;
+  t[1] = (uint8)(sl - 2 + 1);
+  t[2] = 0x02;
+  t[3] = (uint8)(sig[3] + 1);
+  t[4] = 0x00;
+  for i in 4..sl { t[i + 1] = sig[i]; }
+  tc_ok("form: padded integer fails", !cr_p256_ecdsa_verify(&t[0], sl + 1, &msg[0], 5, CR_HASH_SHA256, &pk[0], 65));
+
+  // r or s equal to 0, to n, or above n.
+  var zero: uint8[32];
+  var one: uint8[32];
+  var n: uint8[32];
+  var n1: uint8[32];
+  var big: uint8[32];
+  one[31] = 1;
+  crx_p256_order(&n[0]);
+  crx_p256_order(&n1[0]);
+  n1[31] = n1[31] + 1;
+  for i in 0..32 { big[i] = 255; }
+  var names: string[4] = ["0", "n", "n+1", "2^256-1"];
+  for i in 0..4 {
+    var v: uint8[32];
+    var d: uint8[80];
+    if (i == 0) { for j in 0..32 { v[j] = zero[j]; } }
+    if (i == 1) { for j in 0..32 { v[j] = n[j]; } }
+    if (i == 2) { for j in 0..32 { v[j] = n1[j]; } }
+    if (i == 3) { for j in 0..32 { v[j] = big[j]; } }
+    var dl: int64 = der_from_raw(&d[0], &v[0], &s[0]);
+    tc_ok("form: r = {names[i]} fails", !cr_p256_ecdsa_verify(&d[0], dl, &msg[0], 5, CR_HASH_SHA256, &pk[0], 65));
+    dl = der_from_raw(&d[0], &r[0], &v[0]);
+    tc_ok("form: s = {names[i]} fails", !cr_p256_ecdsa_verify(&d[0], dl, &msg[0], 5, CR_HASH_SHA256, &pk[0], 65));
+  }
+  var d2: uint8[80];
+  var dl2: int64 = der_from_raw(&d2[0], &one[0], &one[0]);
+  tc_ok("form: r = s = 1 fails", !cr_p256_ecdsa_verify(&d2[0], dl2, &msg[0], 5, CR_HASH_SHA256, &pk[0], 65));
+  dl2 = der_from_raw(&d2[0], &zero[0], &zero[0]);
+  tc_ok("form: r = s = 0 fails", !cr_p256_ecdsa_verify(&d2[0], dl2, &msg[0], 5, CR_HASH_SHA256, &pk[0], 65));
+
+  // Empty and tiny signatures.
+  tc_ok("form: empty fails", !cr_p256_ecdsa_verify(&sig[0], 0, &msg[0], 5, CR_HASH_SHA256, &pk[0], 65));
+  tc_ok("form: 7 bytes fails", !cr_p256_ecdsa_verify(&sig[0], 7, &msg[0], 5, CR_HASH_SHA256, &pk[0], 65));
+  tc_ok("form: 100000 bytes fails", !cr_p256_ecdsa_verify(&sig[0], 100000, &msg[0], 5, CR_HASH_SHA256, &pk[0], 65));
+  cr_wipe(&sk.b[0], 32);
+}
+
+// Public keys that must be refused.
+fn key_forms() {
+  var sk: CrP256Secret;
+  var pk: uint8[70];
+  var sig: uint8[72];
+  var sl: int64 = 0;
+  var msg: uint8[3];
+  msg[0] = 1; msg[1] = 2; msg[2] = 3;
+  tc_unhex("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721", &sk.b[0], 32);
+  cr_p256_public_from_secret(&pk[0], 65, &sk);
+  cr_p256_ecdsa_sign(&sig[0], 72, &sl, &msg[0], 3, CR_HASH_SHA256, &sk);
+  tc_ok("key: good", cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], 3, CR_HASH_SHA256, &pk[0], 65));
+  tc_ok("key: length 64", !cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], 3, CR_HASH_SHA256, &pk[0], 64));
+  tc_ok("key: length 66", !cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], 3, CR_HASH_SHA256, &pk[0], 66));
+  tc_ok("key: length 0", !cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], 3, CR_HASH_SHA256, &pk[0], 0));
+  tc_ok("key: null", !cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], 3, CR_HASH_SHA256, 0, 65));
+  var q: uint8[70];
+  for i in 0..65 { q[i] = pk[i]; }
+  q[0] = 2;
+  tc_ok("key: compressed tag", !cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], 3, CR_HASH_SHA256, &q[0], 65));
+  q[0] = 6;
+  tc_ok("key: hybrid tag", !cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], 3, CR_HASH_SHA256, &q[0], 65));
+  q[0] = 4;
+  q[64] = q[64] ^ 1;
+  tc_ok("key: off the curve", !cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], 3, CR_HASH_SHA256, &q[0], 65));
+  for i in 0..65 { q[i] = 0; }
+  q[0] = 4;
+  tc_ok("key: point (0, 0)", !cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], 3, CR_HASH_SHA256, &q[0], 65));
+  cr_wipe(&sk.b[0], 32);
+}
+
+fn argument_errors() {
+  var sk: CrP256Secret;
+  var pk: uint8[65];
+  var sig: uint8[80];
+  var sl: int64 = 0;
+  var msg: uint8[4];
+  msg[0] = 9;
+  tc_unhex("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721", &sk.b[0], 32);
+  cr_p256_public_from_secret(&pk[0], 65, &sk);
+  tc_ok("size constant", CR_P256_ECDSA_SIG_MAX == 72);
+
+  // Bad hash ids.
+  var bad: int32[5] = [0, 4, -1, 100, 65537];
+  for i in 0..5 {
+    sl = 99;
+    tc_fill(&sig[0], 80, 7);
+    tc_rc("hash id {bad[i]}: sign", cr_p256_ecdsa_sign(&sig[0], 72, &sl, &msg[0], 1, bad[i], &sk), CR_E_ARG);
+    tc_ok("hash id {bad[i]}: nothing written", sl == 0 && sig[0] == 7 && sig[71] == 7);
+  }
+  cr_p256_ecdsa_sign(&sig[0], 72, &sl, &msg[0], 1, CR_HASH_SHA256, &sk);
+  for i in 0..5 {
+    tc_ok("hash id {bad[i]}: verify", !cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], 1, bad[i], &pk[0], 65));
+  }
+
+  // Null and negative arguments.
+  tc_rc("sign null sig", cr_p256_ecdsa_sign(0, 72, &sl, &msg[0], 1, CR_HASH_SHA256, &sk), CR_E_ARG);
+  tc_rc("sign null sig_len", cr_p256_ecdsa_sign(&sig[0], 72, 0, &msg[0], 1, CR_HASH_SHA256, &sk), CR_E_ARG);
+  tc_rc("sign null key", cr_p256_ecdsa_sign(&sig[0], 72, &sl, &msg[0], 1, CR_HASH_SHA256, 0), CR_E_ARG);
+  tc_rc("sign null msg", cr_p256_ecdsa_sign(&sig[0], 72, &sl, 0, 1, CR_HASH_SHA256, &sk), CR_E_ARG);
+  tc_rc("sign negative length", cr_p256_ecdsa_sign(&sig[0], 72, &sl, &msg[0], -1, CR_HASH_SHA256, &sk), CR_E_ARG);
+  tc_rc("sign negative capacity", cr_p256_ecdsa_sign(&sig[0], -1, &sl, &msg[0], 1, CR_HASH_SHA256, &sk), CR_E_ARG);
+  tc_ok("sign errors leave length 0", sl == 0);
+  tc_rc("sign empty message, null pointer", cr_p256_ecdsa_sign(&sig[0], 72, &sl, 0, 0, CR_HASH_SHA256, &sk), CR_OK);
+  tc_ok("empty message (null) verifies", cr_p256_ecdsa_verify(&sig[0], sl, 0, 0, CR_HASH_SHA256, &pk[0], 65));
+  tc_ok("empty message (pointer) verifies", cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], 0, CR_HASH_SHA256, &pk[0], 65));
+  tc_ok("verify null sig", !cr_p256_ecdsa_verify(0, 70, &msg[0], 1, CR_HASH_SHA256, &pk[0], 65));
+  tc_ok("verify null msg", !cr_p256_ecdsa_verify(&sig[0], sl, 0, 1, CR_HASH_SHA256, &pk[0], 65));
+  tc_ok("verify negative msg length", !cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], -1, CR_HASH_SHA256, &pk[0], 65));
+  tc_ok("verify negative sig length", !cr_p256_ecdsa_verify(&sig[0], -1, &msg[0], 1, CR_HASH_SHA256, &pk[0], 65));
+
+  // Capacity: nothing is written below the DER length.
+  var dl: int64 = 0;
+  tc_rc("sign for length", cr_p256_ecdsa_sign(&sig[0], 72, &dl, &msg[0], 1, CR_HASH_SHA256, &sk), CR_OK);
+  for cap in 0..dl {
+    tc_fill(&sig[0], 80, 7);
+    sl = 99;
+    tc_rc("capacity {cap}", cr_p256_ecdsa_sign(&sig[0], cap, &sl, &msg[0], 1, CR_HASH_SHA256, &sk), CR_E_SPACE);
+    tc_ok("capacity {cap}: nothing written", sl == 0 && tc_all_bytes(&sig[0], 80, (uint8)7));
+  }
+  tc_fill(&sig[0], 80, 7);
+  tc_rc("capacity exact", cr_p256_ecdsa_sign(&sig[0], dl, &sl, &msg[0], 1, CR_HASH_SHA256, &sk), CR_OK);
+  tc_ok("capacity exact: length and no overrun", sl == dl && sig[dl] == 7 && sig[79] == 7);
+
+  // Bad secret scalars: 0, n, n + 1, 2^256 - 1.
+  var bads: string[4] = [
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
+    "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632552",
+    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  ];
+  var sk2: CrP256Secret;
+  for i in 0..4 {
+    tc_unhex(bads[i], &sk2.b[0], 32);
+    tc_fill(&sig[0], 80, 7);
+    sl = 99;
+    tc_rc("bad key {i}", cr_p256_ecdsa_sign(&sig[0], 72, &sl, &msg[0], 1, CR_HASH_SHA256, &sk2), CR_E_KEY);
+    tc_ok("bad key {i}: nothing written", sl == 0 && tc_all_bytes(&sig[0], 80, (uint8)7));
+  }
+  // n - 1 is the largest valid scalar.
+  tc_unhex("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632550", &sk2.b[0], 32);
+  var pk2: uint8[65];
+  tc_rc("n-1 public key", cr_p256_public_from_secret(&pk2[0], 65, &sk2), CR_OK);
+  tc_rc("n-1 sign", cr_p256_ecdsa_sign(&sig[0], 72, &sl, &msg[0], 1, CR_HASH_SHA384, &sk2), CR_OK);
+  tc_ok("n-1 verifies", cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], 1, CR_HASH_SHA384, &pk2[0], 65));
+  // The scalar 1.
+  tc_unhex("0000000000000000000000000000000000000000000000000000000000000001", &sk2.b[0], 32);
+  tc_rc("1 public key", cr_p256_public_from_secret(&pk2[0], 65, &sk2), CR_OK);
+  tc_rc("1 sign", cr_p256_ecdsa_sign(&sig[0], 72, &sl, &msg[0], 1, CR_HASH_SHA512, &sk2), CR_OK);
+  tc_ok("1 verifies", cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], 1, CR_HASH_SHA512, &pk2[0], 65));
+  cr_wipe(&sk.b[0], 32);
+  cr_wipe(&sk2.b[0], 32);
+}
+
+// The raw and DER routines directly.
+fn der_routines() {
+  // DER and raw round trips for r and s with 0 to 3 leading zero bytes, and
+  // with and without the top bit set.
+  var fills: uint8[4] = [(uint8)0x01, (uint8)0x7f, (uint8)0x80, (uint8)0xff];
+  for a in 0..4 {
+    for b in 0..4 {
+      for za in 0..3 {
+        for zb in 0..3 {
+          var raw: uint8[80];
+          var keep: uint8[64];
+          for i in 0..32 {
+            raw[i] = fills[a];
+            raw[32 + i] = fills[b];
+            if (i < za) { raw[i] = 0; }
+            if (i < zb) { raw[32 + i] = 0; }
+          }
+          for i in 0..64 { keep[i] = raw[i]; }
+          var label: string = "der {a} {b} {za} {zb}";
+          var dl: int64 = crx_ecdsa_raw_to_asn1(&raw[0], 64);
+          tc_ok(label + " encodes", dl >= 8 && dl <= 72 && raw[0] == 0x30 && (int64)raw[1] == dl - 2);
+          var rl: int64 = crx_ecdsa_asn1_to_raw(&raw[0], dl);
+          var zl: int64 = 32 - (int64)za;
+          if (zb < za) { zl = 32 - (int64)zb; }
+          tc_ok(label + " decodes", rl == 2 * zl && cr_equal(&raw[0], &keep[32 - zl], zl) && cr_equal(&raw[zl], &keep[64 - zl], zl));
+        }
+      }
+    }
+  }
+  // Small values give the shortest raw form, padded to equal lengths.
+  var small: uint8[80];
+  small[0] = 0x30; small[1] = 0x07; small[2] = 0x02; small[3] = 0x01; small[4] = 0x05;
+  small[5] = 0x02; small[6] = 0x02; small[7] = 0x01; small[8] = 0x02;
+  tc_ok("atr short", crx_ecdsa_asn1_to_raw(&small[0], 9) == 4);
+  tc_ok("atr short values", small[0] == 0 && small[1] == 5 && small[2] == 1 && small[3] == 2);
+  tc_ok("rta odd length", crx_ecdsa_raw_to_asn1(&small[0], 3) == 0);
+  var big: uint8[300];
+  for i in 0..300 { big[i] = 0xff; }
+  tc_ok("rta integers over 125 bytes", crx_ecdsa_raw_to_asn1(&big[0], 252) == 0);
+  var z2: uint8[80];
+  z2[0] = 0; z2[1] = 0;
+  var zl: int64 = crx_ecdsa_raw_to_asn1(&z2[0], 2);
+  tc_ok("rta zero value encodes as 02 01 00", zl == 8 && z2[2] == 2 && z2[3] == 1 && z2[4] == 0 && z2[5] == 2 && z2[6] == 1 && z2[7] == 0);
+  tc_ok("atr rejects length 7", crx_ecdsa_asn1_to_raw(&small[0], 7) == 0);
+
+  // bits2int against the order's encoded bit length (264).
+  var n: uint32[12];
+  var nb: uint8[32];
+  crx_p256_order(&nb[0]);
+  crx_i31_decode(&n[0], &nb[0], 32);
+  tc_ok("order has 256 bits", n[0] == 264);
+  var src: uint8[64];
+  for i in 0..64 { src[i] = (uint8)(i * 5 + 1); }
+  var x: uint32[12];
+  var out: uint8[32];
+  crx_ecdsa_bits2int(&x[0], &src[0], 32, n[0]);
+  crx_i31_encode(&out[0], 32, &x[0]);
+  tc_ok("bits2int 32 bytes is the input", x[0] == 264 && cr_equal(&out[0], &src[0], 32));
+  crx_ecdsa_bits2int(&x[0], &src[0], 48, n[0]);
+  crx_i31_encode(&out[0], 32, &x[0]);
+  tc_ok("bits2int 48 bytes keeps the leftmost 256 bits", cr_equal(&out[0], &src[0], 32));
+  crx_ecdsa_bits2int(&x[0], &src[0], 64, n[0]);
+  crx_i31_encode(&out[0], 32, &x[0]);
+  tc_ok("bits2int 64 bytes keeps the leftmost 256 bits", cr_equal(&out[0], &src[0], 32));
+  crx_ecdsa_bits2int(&x[0], &src[0], 20, n[0]);
+  crx_i31_encode(&out[0], 32, &x[0]);
+  var padded: bool = true;
+  for i in 0..12 { if (out[i] != 0) { padded = false; } }
+  for i in 0..20 { if (out[12 + i] != src[i]) { padded = false; } }
+  tc_ok("bits2int 20 bytes is left-padded", padded);
+}
+
+// Release time per sign and per verify, printed for the report.
+fn timing() {
+  var sk: CrP256Secret;
+  var pk: uint8[65];
+  var sig: uint8[72];
+  var sl: int64 = 0;
+  var msg: uint8[32];
+  cr_p256_keypair(&pk[0], 65, &sk);
+  var t0: int64 = time_mono_us();
+  for i in 0..20 {
+    msg[0] = (uint8)i;
+    cr_p256_ecdsa_sign(&sig[0], 72, &sl, &msg[0], 32, CR_HASH_SHA256, &sk);
+  }
+  var t1: int64 = time_mono_us();
+  var okc: int32 = 0;
+  for i in 0..20 {
+    msg[0] = 19;
+    if (cr_p256_ecdsa_verify(&sig[0], sl, &msg[0], 32, CR_HASH_SHA256, &pk[0], 65)) { okc = okc + 1; }
+  }
+  var t2: int64 = time_mono_us();
+  tc_ok("timing run verifies", okc == 20);
+  println("timing: sign {(t1 - t0) / 20} us, verify {(t2 - t1) / 20} us (average of 20)");
+  cr_wipe(&sk.b[0], 32);
+}
+
+fn main() -> int32 {
+  rfc6979();
+  cavp_rows();
+  wp_rows(&VEC_WP_ECDSA_256_SHA256[0], VEC_WP_ECDSA_256_SHA256_N, "wp sha256");
+  wp_rows(&VEC_WP_ECDSA_256_SHA512[0], VEC_WP_ECDSA_256_SHA512_N, "wp sha512");
+  round_trips();
+  signature_forms();
+  key_forms();
+  argument_errors();
+  der_routines();
+  timing();
+  return tc_finish("ecdsa_p256");
+}

@@ -4,7 +4,7 @@ Generated from the `///` contracts in `src/`. Do not edit by hand.
 
 Pure Mettle: no C, no shared state. Every function is safe on any thread.
 
-Primitives: [core/status](#corestatus), [core/types](#coretypes), [core/util](#coreutil), [core/encode](#coreencode), [hash/hash](#hashhash), [mac/mac](#macmac), [mac/kdf](#mackdf), [password/pwhash](#passwordpwhash), [cipher/aead](#cipheraead), [cipher/gcm](#ciphergcm), [ecc/kx](#ecckx), [ecc/sign](#eccsign), [ecc/p256](#eccp256).
+Primitives: [core/status](#corestatus), [core/types](#coretypes), [core/util](#coreutil), [core/encode](#coreencode), [hash/hash](#hashhash), [mac/mac](#macmac), [mac/kdf](#mackdf), [password/pwhash](#passwordpwhash), [cipher/aead](#cipheraead), [cipher/gcm](#ciphergcm), [ecc/kx](#ecckx), [ecc/sign](#eccsign), [ecc/p256](#eccp256), [ecc/ecdsa](#eccecdsa), [rsa/rsa](#rsarsa).
 Recipes: [recipes/signed](#recipessigned), [recipes/token](#recipestoken), [recipes/seal](#recipesseal), [recipes/totp](#recipestotp).
 
 ## core/status
@@ -2279,6 +2279,98 @@ Computes the raw ECDH shared secret of P-256: the X coordinate of the point sk *
 
 ```mettle
 var z: CrKey32; if (cr_p256_ecdh(&z, &sk, &peer[0], 65) != CR_OK) { reject(); }
+```
+
+## ecc/ecdsa
+
+ECDSA on NIST P-256 (secp256r1), in pure Mettle: deterministic signatures (RFC 6979) with constant-time signing, and strict verification. Standards: FIPS 186-5 (ECDSA), SEC 1 v2, RFC 6979 (the nonce), RFC 3279 (the DER signature, SEQUENCE { INTEGER r, INTEGER s }).
+
+### CR_P256_ECDSA_SIG_MAX
+
+```mettle
+export const CR_P256_ECDSA_SIG_MAX: int64 = 72;
+```
+
+Largest DER signature cr_p256_ecdsa_sign can write: 72 bytes (a SEQUENCE of two INTEGERs of up to 33 bytes each).
+
+- **returns:** 72
+- **owns:** nothing
+- **thread:** constant
+
+```mettle
+var sig: uint8[72]; var sl: int64; cr_p256_ecdsa_sign(&sig[0], CR_P256_ECDSA_SIG_MAX, &sl, m, n, CR_HASH_SHA256, &sk);
+```
+
+### cr_p256_ecdsa_sign
+
+```mettle
+export fn cr_p256_ecdsa_sign(sig: uint8*, sig_cap: int64, sig_len: int64*, msg: uint8*, n: int64, hash: int32, sk: CrP256Secret*) -> int32
+```
+
+Signs a message with ECDSA on P-256 and returns the signature in DER (SEQUENCE { INTEGER r, INTEGER s }, 8 to 72 bytes). The message is hashed with the chosen hash (CR_HASH_SHA256, CR_HASH_SHA384 or CR_HASH_SHA512); the nonce is deterministic (RFC 6979, HMAC_DRBG over the same hash), so a bad random source cannot leak the key, and the same inputs always give the same signature. The signing time does not depend on the secret scalar or the nonce.
+
+- **in:** sig, writable for sig_cap bytes (CR_P256_ECDSA_SIG_MAX = 72 always suffices); sig_len, receives the length; msg readable for n bytes (msg may be 0 only when n == 0); hash a CR_HASH_* id; sk the secret scalar
+- **returns:** CR_OK; CR_E_ARG (null pointer, negative n or sig_cap, unknown hash id); CR_E_KEY if the scalar is 0 or not lower than the group order; CR_E_SPACE if sig_cap is smaller than the DER length (nothing is written). On every error *sig_len is 0
+- **owns:** sk is secret caller memory; every temporary (nonce, DRBG state, scalars) is wiped before return
+- **thread:** any thread (no shared state)
+
+```mettle
+var sl: int64; if (cr_p256_ecdsa_sign(&sig[0], 72, &sl, m.chars, (int64)m.length, CR_HASH_SHA256, &sk) != CR_OK) { fail(); }
+```
+
+### cr_p256_ecdsa_verify
+
+```mettle
+export fn cr_p256_ecdsa_verify(sig: uint8*, sig_len: int64, msg: uint8*, n: int64, hash: int32, pk: uint8*, pk_len: int64) -> bool
+```
+
+Verifies an ECDSA P-256 signature over a message. The message is hashed with the chosen hash (CR_HASH_SHA256, CR_HASH_SHA384 or CR_HASH_SHA512). The public key is the 65-byte point 0x04 || X || Y and is fully validated (coordinates below the field prime, on the curve). The signature must be strict DER: it is converted to r || s and encoded again, and the two encodings must be byte-identical (no leading zeros, no BER forms); r and s must be in [1, n-1]. Only public data is used.
+
+- **in:** sig readable for sig_len bytes; msg readable for n bytes (msg may be 0 only when n == 0); hash a CR_HASH_* id; pk readable for pk_len bytes
+- **returns:** true only for a valid signature; false for an invalid one and for every error (null pointer, negative length, unknown hash, bad key or signature encoding): it fails closed
+- **owns:** nothing
+- **thread:** any thread (no shared state)
+
+```mettle
+if (!cr_p256_ecdsa_verify(&sig[0], sl, m.chars, (int64)m.length, CR_HASH_SHA256, &pk[0], 65)) { reject(); }
+```
+
+## rsa/rsa
+
+RSA signature verification in pure Mettle: RSASSA-PKCS1-v1_5 (RFC 8017 sections 8.2.2 and 9.2) and RSASSA-PSS (sections 8.1.2 and 9.1.2, with MGF1 from appendix B.2.1), over the 31-bit big integers of crypto/ecc/i31.
+
+### cr_rsa_verify_pkcs1
+
+```mettle
+export fn cr_rsa_verify_pkcs1(sig: uint8*, sig_len: int64, msg: uint8*, n: int64, hash: int32, mod: uint8*, mod_len: int64, e: uint8*, e_len: int64) -> bool
+```
+
+Verifies an RSASSA-PKCS1-v1_5 signature (RFC 8017 8.2.2) over a message. The message is hashed with the CR_HASH_* choice and the signature must equal the encoding 00 01 FF..FF 00 DigestInfo(hash, NULL parameters) H exactly. The modulus must have 2048 to 4096 bits and be odd; the public exponent must be odd, at least 3 and at most 8 bytes; both are big-endian and may carry leading zero bytes. The signature must be exactly as long as the modulus and lower than it.
+
+- **in:** sig readable for sig_len bytes; msg readable for n bytes (may be 0 when n == 0); hash is CR_HASH_SHA256, CR_HASH_SHA384 or CR_HASH_SHA512; mod readable for mod_len bytes; e readable for e_len bytes
+- **returns:** true only for a valid signature; false for an invalid one and for any bad argument (null pointer, negative length, unknown hash, bad key, wrong signature length)
+- **owns:** nothing; all inputs stay with the caller
+- **thread:** any thread (no shared state)
+
+```mettle
+if (cr_rsa_verify_pkcs1(sig, sl, m, n, CR_HASH_SHA256, mod, ml, e, el)) { accept(); }
+```
+
+### cr_rsa_verify_pss
+
+```mettle
+export fn cr_rsa_verify_pss(sig: uint8*, sig_len: int64, msg: uint8*, n: int64, hash: int32, mod: uint8*, mod_len: int64, e: uint8*, e_len: int64) -> bool
+```
+
+Verifies an RSASSA-PSS signature (RFC 8017 8.1.2) over a message. The message is hashed with the CR_HASH_* choice; MGF1 uses the same hash, the salt is as long as the hash and the trailer is 0xbc (RFC 8017 9.1.2). The modulus must have 2048 to 4096 bits and be odd; the public exponent must be odd, at least 3 and at most 8 bytes; both are big-endian and may carry leading zero bytes. The signature must be exactly as long as the modulus and lower than it.
+
+- **in:** sig readable for sig_len bytes; msg readable for n bytes (may be 0 when n == 0); hash is CR_HASH_SHA256, CR_HASH_SHA384 or CR_HASH_SHA512; mod readable for mod_len bytes; e readable for e_len bytes
+- **returns:** true only for a valid signature; false for an invalid one and for any bad argument (null pointer, negative length, unknown hash, bad key, wrong signature length)
+- **owns:** nothing; all inputs stay with the caller
+- **thread:** any thread (no shared state)
+
+```mettle
+if (cr_rsa_verify_pss(sig, sl, m, n, CR_HASH_SHA256, mod, ml, e, el)) { accept(); }
 ```
 
 ## recipes/signed
