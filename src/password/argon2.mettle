@@ -255,7 +255,7 @@ export fn crx_argon2id(out: uint8*, outlen: int64, pw: uint8*, pwlen: int64, sal
   if (base <= 0) { return CR_E_INTERNAL; }
   var raw: uint8* = (uint8*)base;
   crx_region_begin(raw, bytes);
-  var mem: uint64* = (uint64*)base;
+  var mem: uint64* = (uint64*)raw;
 
   // H0 (RFC 9106 section 3.2)
   var h0: uint8[72];

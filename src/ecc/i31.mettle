@@ -784,7 +784,7 @@ export fn crx_i31_modpow_opt(x: uint32*, e_in: uint8*, elen_in: int64, m: uint32
 
   // Process the exponent bits from the most significant; acc_len bits are
   // held in acc.
-  var e: uint8* = e_in;
+  var ei: int64 = 0;
   var elen: int64 = elen_in;
   var acc: uint32 = 0;
   var acc_len: int32 = 0;
@@ -792,8 +792,8 @@ export fn crx_i31_modpow_opt(x: uint32*, e_in: uint8*, elen_in: int64, m: uint32
     var k: int32 = win_len;
     if (acc_len < win_len) {
       if (elen > 0) {
-        acc = (acc << 8) | (uint32)e[0];
-        e = &e[1];
+        acc = (acc << 8) | (uint32)e_in[ei];
+        ei = ei + 1;
         elen = elen - 1;
         acc_len = acc_len + 8;
       } else {

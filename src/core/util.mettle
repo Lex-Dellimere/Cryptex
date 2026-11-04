@@ -123,6 +123,7 @@ export fn cr_wipe(buf: uint8*, n: int64) -> int32 {
   }
   // Whole words.
   var words: int64 = (n - head) / 8;
+  if (words == 0 && head == n) { return CR_OK; }
   var w: volatile uint64* = (volatile uint64*)&buf[head];
   var j: int64 = 0;
   while (j < words) {
@@ -131,6 +132,7 @@ export fn cr_wipe(buf: uint8*, n: int64) -> int32 {
   }
   // Tail bytes.
   var tail: int64 = n - head - words * 8;
+  if (tail == 0) { return CR_OK; }
   var t: volatile uint8* = (volatile uint8*)&buf[head + words * 8];
   var k: int64 = 0;
   while (k < tail) {

@@ -1,0 +1,2610 @@
+// Hostile-input fuzzing of the public API. Nothing may crash, hang or read out of
+// bounds, and every check must fail closed.
+//
+// Inputs come from a fixed-seed SplitMix64 generator, so every run is the same.
+// Per target there are three kinds of input: fully random bytes, a valid input made
+// by the library with 1 to 4 random edits (flips, cuts, extensions), and structured
+// junk (DER with odd tags and lengths, text from the expected alphabet plus a few
+// bad characters, low-order curve points). Expected results come from small reference
+// decoders and checkers in this file, or from the fact that a changed valid input
+// must be refused.
+//
+// Memory safety does not depend on the compiler's bounds checks. Every input is copied
+// to the end of its own page with an unmapped page right after it, and every output
+// buffer ends at the end of a page too, so a read or write one byte past the end
+// faults. A canary run in front of each output catches writes before its start, and
+// every failing decrypt or decode must leave its output buffer wiped.
+import "std/mem";
+import "std/conv";
+import "std/io";
+import "crypto/crypto";
+import "crypto/password/argon2";
+import "crypto/core/sys_x86_64" if x86_64;
+import "crypto/core/sys_aarch64" if aarch64;
+import "tcheck";
+import "vectors/vec_cavp_rsa_15";
+import "vectors/vec_cavp_rsa_pss";
+
+const FUZZ_ROUNDS: int64 = 2000;
+const RSA_ROUNDS: int64 = 200;
+const PAGE: int64 = 4096;
+const SLOTS: int64 = 32;
+const OUT_PAGES: int64 = 4;
+const CAN: int64 = 64;
+const CANARY: uint8 = 165;
+
+var g_rs: uint64 = 88172645463325252;
+var g_out2: uint8[12500];
+var g_o: uint8* = 0;
+var g_gbase: int64 = 0;
+var g_gnext: int64 = 0;
+var g_obase: int64 = 0;
+var g_shown: int32 = 0;
+
+// ---- generator, buffers, mutation -----------------------------------------
+
+fn rnd() -> uint64 {
+  g_rs = g_rs + 11400714819323198485;
+  var z: uint64 = g_rs;
+  z = (z ^ (z >> 30)) * 13787848793156543929;
+  z = (z ^ (z >> 27)) * 10723151780598845931;
+  return z ^ (z >> 31);
+}
+
+// 0..n-1
+fn rn(n: int64) -> int64 {
+  if (n <= 1) { return 0; }
+  return (int64)(rnd() % (uint64)n);
+}
+
+fn rb() -> uint8 {
+  return (uint8)(rnd() & 255);
+}
+
+fn rfill(p: uint8*, n: int64) {
+  var i: int64 = 0;
+  while (i < n) {
+    p[i] = rb();
+    i = i + 1;
+  }
+}
+
+fn cp(dst: uint8*, src: uint8*, n: int64) {
+  var i: int64 = 0;
+  while (i < n) {
+    dst[i] = src[i];
+    i = i + 1;
+  }
+}
+
+// Guard pages: the data page of each slot is read-write, the page after it stays
+// PROT_NONE.
+fn guard_init() {
+  // prot 0 is PROT_NONE; flags 34 is MAP_PRIVATE | MAP_ANONYMOUS, 50 adds MAP_FIXED.
+  g_gbase = syscall(CRX_SYS_MMAP, 0, SLOTS * 2 * PAGE, 0, 34, -1, 0);
+  g_obase = syscall(CRX_SYS_MMAP, 0, (OUT_PAGES + 1) * PAGE, 0, 34, -1, 0);
+  tc_ok("guard map", g_gbase > 0 && g_obase > 0);
+  var i: int64 = 0;
+  while (i < SLOTS) {
+    var m: int64 = syscall(CRX_SYS_MMAP, g_gbase + i * 2 * PAGE, PAGE, 3, 50, -1, 0);
+    tc_ok("guard slot", m == g_gbase + i * 2 * PAGE);
+    i = i + 1;
+  }
+  var mo: int64 = syscall(CRX_SYS_MMAP, g_obase, OUT_PAGES * PAGE, 3, 50, -1, 0);
+  tc_ok("guard out", mo == g_obase);
+}
+
+// n writable bytes ending exactly at a guard page (a ring of slots; at most a few
+// are live at once).
+fn gal(n: int64) -> uint8* {
+  var slot: int64 = g_gnext % SLOTS;
+  g_gnext = g_gnext + 1;
+  return (uint8*)(g_gbase + slot * 2 * PAGE + PAGE - n);
+}
+
+fn gfree(p: uint8*) {
+}
+
+// A guarded copy of n bytes.
+fn dup(p: uint8*, n: int64) -> uint8* {
+  var q: uint8* = gal(n);
+  cp(q, p, n);
+  return q;
+}
+
+fn same(a: uint8*, an: int64, b: uint8*, bn: int64) -> bool {
+  if (an != bn) { return false; }
+  var i: int64 = 0;
+  while (i < an) {
+    if (a[i] != b[i]) { return false; }
+    i = i + 1;
+  }
+  return true;
+}
+
+fn pick(s: string) -> uint8 {
+  return s.chars[rn((int64)s.length)];
+}
+
+fn text_of(p: uint8*, n: int64) -> string {
+  return str_from_bytes((cstring)p, n);
+}
+
+fn lit(p: uint8*, s: string) -> int64 {
+  var i: int64 = 0;
+  while (i < (int64)s.length) {
+    p[i] = s.chars[i];
+    i = i + 1;
+  }
+  return (int64)s.length;
+}
+
+fn chk(name: string, cond: bool, p: uint8*, n: int64) {
+  tc_ok(name, cond);
+  if (!cond && g_shown < 40) {
+    g_shown = g_shown + 1;
+    var m: int64 = n;
+    if (m > 600) { m = 600; }
+    var h: string = tc_hex(p, m);
+    println("  input " + h);
+    free(h.chars);
+  }
+}
+
+// Output buffer g_o of cap bytes ending exactly at a guard page, filled with a pattern,
+// with a canary run in front of it (a write before the start is caught by can_ok).
+fn can_set(cap: int64) {
+  g_o = (uint8*)(g_obase + OUT_PAGES * PAGE - cap);
+  var i: int64 = 0;
+  while (i < cap) {
+    g_o[i] = CANARY;
+    i = i + 1;
+  }
+  i = 1;
+  while (i <= CAN) {
+    g_o[-i] = CANARY;
+    i = i + 1;
+  }
+}
+
+fn can_ok(cap: int64) -> bool {
+  var i: int64 = 1;
+  while (i <= CAN) {
+    if (g_o[-i] != CANARY) { return false; }
+    i = i + 1;
+  }
+  return true;
+}
+
+fn out_zero(cap: int64) -> bool {
+  var i: int64 = 0;
+  while (i < cap) {
+    if (g_o[i] != 0) { return false; }
+    i = i + 1;
+  }
+  return true;
+}
+
+fn is_status(rc: int32) -> bool {
+  return rc == CR_OK || (rc <= CR_E_ARG + 1 && rc >= CR_E_EXPIRED);
+}
+
+// Flips 1 to 4 random bytes (same length).
+fn flips(b: uint8*, n: int64) {
+  if (n <= 0) { return; }
+  var k: int64 = 1 + rn(4);
+  var j: int64 = 0;
+  while (j < k) {
+    var i: int64 = rn(n);
+    if (rn(2) == 0) {
+      b[i] = (uint8)(b[i] ^ (uint8)(1 + rn(255)));
+    } else {
+      b[i] = (uint8)(b[i] ^ (uint8)(1 << (uint32)rn(8)));
+    }
+    j = j + 1;
+  }
+}
+
+// 1 to 4 random edits: byte flip, bit flip, cut, extension. Length stays in 0..cap.
+fn mutate(b: uint8*, len: int64*, cap: int64) {
+  var k: int64 = 1 + rn(4);
+  var j: int64 = 0;
+  while (j < k) {
+    var n: int64 = *len;
+    var kind: int64 = rn(6);
+    if (kind <= 1 && n > 0) {
+      var i: int64 = rn(n);
+      b[i] = (uint8)(b[i] ^ (uint8)(1 + rn(255)));
+    }
+    if (kind == 2 && n > 0) {
+      var i2: int64 = rn(n);
+      b[i2] = (uint8)(b[i2] ^ (uint8)(1 << (uint32)rn(8)));
+    }
+    if (kind == 3 && n > 0) {
+      *len = rn(n);
+    }
+    if (kind >= 4 && n < cap) {
+      var add: int64 = 1 + rn(8);
+      if (n + add > cap) { add = cap - n; }
+      rfill(&b[n], add);
+      *len = n + add;
+    }
+    j = j + 1;
+  }
+}
+
+fn report(name: string, tried: int64) {
+  println("fuzz " + name + ": {tried} inputs");
+}
+
+// ---- encode ---------------------------------------------------------------
+
+fn hex_val(c: uint8) -> int32 {
+  if (c >= 48 && c <= 57) { return (int32)c - 48; }
+  if (c >= 97 && c <= 102) { return (int32)c - 87; }
+  if (c >= 65 && c <= 70) { return (int32)c - 55; }
+  return -1;
+}
+
+fn b64_val(c: uint8) -> int32 {
+  if (c >= 65 && c <= 90) { return (int32)c - 65; }
+  if (c >= 97 && c <= 122) { return (int32)c - 71; }
+  if (c >= 48 && c <= 57) { return (int32)c + 4; }
+  if (c == 45) { return 62; }
+  if (c == 95) { return 63; }
+  return -1;
+}
+
+// Reference decoders: the length, or -1 when the text is not valid.
+fn ref_hex(t: uint8*, n: int64, out: uint8*) -> int64 {
+  if (n % 2 != 0) { return -1; }
+  var i: int64 = 0;
+  while (i < n / 2) {
+    var a: int32 = hex_val(t[i * 2]);
+    var b: int32 = hex_val(t[i * 2 + 1]);
+    if (a < 0 || b < 0) { return -1; }
+    out[i] = (uint8)(a * 16 + b);
+    i = i + 1;
+  }
+  return n / 2;
+}
+
+fn ref_b64(t: uint8*, n: int64, out: uint8*) -> int64 {
+  if (n % 4 == 1) { return -1; }
+  var acc: int32 = 0;
+  var bits: int32 = 0;
+  var o: int64 = 0;
+  var i: int64 = 0;
+  while (i < n) {
+    var v: int32 = b64_val(t[i]);
+    if (v < 0) { return -1; }
+    acc = ((acc << 6) | v) & 65535;
+    bits = bits + 6;
+    if (bits >= 8) {
+      bits = bits - 8;
+      out[o] = (uint8)((acc >> bits) & 255);
+      o = o + 1;
+    }
+    i = i + 1;
+  }
+  if ((acc & ((1 << bits) - 1)) != 0) { return -1; }
+  return o;
+}
+
+var g_ref: uint8[1024];
+
+fn encode_one(is_hex: bool, txt: uint8*, n: int64, cap: int64) {
+  var rl: int64 = 0;
+  if (is_hex) { rl = ref_hex(txt, n, &g_ref[0]); } else { rl = ref_b64(txt, n, &g_ref[0]); }
+  var need: int64 = n / 2;
+  if (!is_hex) { need = n * 3 / 4; }
+  var t: uint8* = dup(txt, n);
+  can_set(cap);
+  var ol: int64 = 777;
+  var rc: int32 = 0;
+  if (is_hex) { rc = cr_hex_decode(g_o, cap, &ol, t, n); } else { rc = cr_base64url_decode(g_o, cap, &ol, t, n); }
+  chk("encode status", is_status(rc), txt, n);
+  chk("encode canary", can_ok(cap), txt, n);
+  if (rl >= 0 && cap >= need) {
+    chk("encode valid ok", rc == CR_OK && ol == rl && same(g_o, ol, &g_ref[0], rl), txt, n);
+  } else {
+    var want_ok: bool = rc == CR_E_DECODE || rc == CR_E_SPACE;
+    if (rl >= 0) { want_ok = rc == CR_E_SPACE; }
+    chk("encode fails closed", want_ok && ol == 0 && out_zero(cap), txt, n);
+  }
+  gfree(t);
+}
+
+fn fuzz_encode() {
+  var hexa: string = "0123456789abcdefABCDEF";
+  var b64a: string = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  var bad: string = " =+/\\0g.\"";
+  var buf: uint8[600];
+  var tried: int64 = 0;
+  var r: int64 = 0;
+  while (r < FUZZ_ROUNDS) {
+    var is_hex: bool = (r % 2) == 0;
+    var kind: int64 = rn(3);
+    var n: int64 = 0;
+    if (kind == 0) {
+      n = rn(300);
+      rfill(&buf[0], n);
+    }
+    if (kind == 1) {
+      var raw: uint8[128];
+      var rawn: int64 = rn(100);
+      rfill(&raw[0], rawn);
+      var el: int64 = 0;
+      if (is_hex) { cr_hex_encode(&buf[0], 400, &el, &raw[0], rawn); } else { cr_base64url_encode(&buf[0], 400, &el, &raw[0], rawn); }
+      n = el;
+      mutate(&buf[0], &n, 500);
+    }
+    if (kind == 2) {
+      n = rn(200);
+      if (rn(4) != 0 && is_hex) { n = n - n % 2; }
+      var i: int64 = 0;
+      while (i < n) {
+        if (is_hex) { buf[i] = pick(hexa); } else { buf[i] = pick(b64a); }
+        i = i + 1;
+      }
+      var nb: int64 = rn(3);
+      var j: int64 = 0;
+      while (j < nb && n > 0) {
+        buf[rn(n)] = pick(bad);
+        j = j + 1;
+      }
+    }
+    var need: int64 = n / 2;
+    if (!is_hex) { need = n * 3 / 4; }
+    var cap: int64 = need + rn(3);
+    var cm: int64 = rn(6);
+    if (cm == 0) { cap = 0; }
+    if (cm == 1) { cap = rn(need + 2); }
+    if (cm == 2) { cap = need - 1; if (cap < 0) { cap = 0; } }
+    encode_one(is_hex, &buf[0], n, cap);
+    tried = tried + 1;
+    r = r + 1;
+  }
+  report("encode", tried);
+}
+
+// ---- recipes: signed values -----------------------------------------------
+
+var g_keys: CrKey32[8];
+var g_sbuf: uint8[600];
+var g_sbuf2: uint8[600];
+
+fn new_keys(n: int64) {
+  var i: int64 = 0;
+  while (i < n) {
+    rfill(&g_keys[i].b[0], 32);
+    i = i + 1;
+  }
+}
+
+fn signed_expect_fail(name: string, rc: int32, want: int32, v: string, ki: int32, p: uint8*, n: int64) {
+  chk(name, rc == want && v.length == 0 && ki == -1, p, n);
+}
+
+// Text shaped like value.SIG (form 0) or value.EXP.SIG (form 1) with a wrong or odd tag.
+fn sig_junk(b: uint8*, form: int64) -> int64 {
+  var b64: string = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  var hexa: string = "0123456789abcdefABCDEF";
+  var bad: string = " =+/.\\0g";
+  var n: int64 = rn(20);
+  if (rn(5) == 0) { n = 0; }
+  var i: int64 = 0;
+  while (i < n) {
+    b[i] = 97 + (uint8)rn(26);
+    if (rn(6) == 0) { b[i] = 46; }
+    i = i + 1;
+  }
+  if (form == 1) {
+    b[n] = 46;
+    n = n + 1;
+    var el: int64 = 16;
+    if (rn(3) == 0) { el = rn(20); }
+    i = 0;
+    while (i < el) {
+      b[n + i] = pick(hexa);
+      if (rn(2) == 0) { b[n + i] = hexa.chars[rn(16)]; }
+      i = i + 1;
+    }
+    n = n + el;
+  }
+  b[n] = 46;
+  n = n + 1;
+  var tl: int64 = 43;
+  if (rn(3) == 0) { tl = rn(60); }
+  i = 0;
+  while (i < tl) {
+    b[n + i] = b64.chars[rn(64)];
+    i = i + 1;
+  }
+  var nb: int64 = rn(3);
+  while (nb > 0 && tl > 0) {
+    b[n + rn(tl)] = pick(bad);
+    nb = nb - 1;
+  }
+  return n + tl;
+}
+
+fn fuzz_signed() {
+  var tried: int64 = 0;
+  var r: int64 = 0;
+  while (r < FUZZ_ROUNDS) {
+    var nk: int64 = 1 + rn(8);
+    new_keys(8);
+    var ki: int64 = rn(nk);
+    var plen: int64 = 1 + rn(30);
+    if (rn(20) == 0) { plen = 255; }
+    var pp: uint8* = gal(plen);
+    rfill(pp, plen);
+    var vlen: int64 = rn(60);
+    var vp: uint8* = gal(vlen + 1);
+    rfill(vp, vlen);
+    if (rn(3) == 0 && vlen > 0) { vp[rn(vlen)] = 46; }
+    var purpose: string = text_of(pp, plen);
+    var value: string = text_of(vp, vlen);
+    var sl: int64 = 0;
+    var rc: int32 = cr_signed_sign(&g_sbuf[0], 600, &sl, &g_keys[ki], purpose, value);
+    chk("signed sign", rc == CR_OK && sl == vlen + CR_SIGNED_EXTRA, vp, vlen);
+    cp(&g_sbuf2[0], &g_sbuf[0], sl);
+    var sc: int64 = rn(9);
+    var inl: int64 = sl;
+    var out: string = "x";
+    var kidx: int32 = 55;
+    if (sc == 0) {
+      var s: uint8* = dup(&g_sbuf[0], sl);
+      rc = cr_signed_verify(&out, &kidx, &g_keys[0], (int32)nk, purpose, text_of(s, sl));
+      chk("signed valid", rc == CR_OK && kidx == (int32)ki && same(out.chars, (int64)out.length, vp, vlen), s, sl);
+      gfree(s);
+    }
+    if (sc == 1 || sc == 2) {
+      mutate(&g_sbuf[0], &inl, 600);
+      var s1: uint8* = dup(&g_sbuf[0], inl);
+      rc = cr_signed_verify(&out, &kidx, &g_keys[0], (int32)nk, purpose, text_of(s1, inl));
+      if (same(&g_sbuf[0], inl, &g_sbuf2[0], sl)) {
+        chk("signed noop mutation", rc == CR_OK, s1, inl);
+      } else {
+        signed_expect_fail("signed mutated", rc, CR_E_VERIFY, out, kidx, s1, inl);
+      }
+      gfree(s1);
+    }
+    if (sc == 3) {
+      inl = rn(130);
+      rfill(&g_sbuf[0], inl);
+      var s2: uint8* = dup(&g_sbuf[0], inl);
+      rc = cr_signed_verify(&out, &kidx, &g_keys[0], (int32)nk, purpose, text_of(s2, inl));
+      signed_expect_fail("signed random", rc, CR_E_VERIFY, out, kidx, s2, inl);
+      gfree(s2);
+    }
+    if (sc == 4) {
+      var pl2: int64 = plen;
+      var pp2: uint8* = dup(pp, plen);
+      flips(pp2, plen);
+      var s3: uint8* = dup(&g_sbuf[0], sl);
+      rc = cr_signed_verify(&out, &kidx, &g_keys[0], (int32)nk, text_of(pp2, pl2), text_of(s3, sl));
+      if (same(pp, plen, pp2, pl2)) {
+        chk("signed purpose noop", rc == CR_OK, s3, sl);
+      } else {
+        signed_expect_fail("signed other purpose", rc, CR_E_VERIFY, out, kidx, s3, sl);
+      }
+      gfree(pp2);
+      gfree(s3);
+    }
+    if (sc == 5) {
+      rfill(&g_keys[ki].b[0], 32);
+      var s4: uint8* = dup(&g_sbuf[0], sl);
+      rc = cr_signed_verify(&out, &kidx, &g_keys[0], (int32)nk, purpose, text_of(s4, sl));
+      signed_expect_fail("signed other key", rc, CR_E_VERIFY, out, kidx, s4, sl);
+      gfree(s4);
+    }
+    if (sc == 6) {
+      var s5: uint8* = dup(&g_sbuf[0], sl);
+      var bn: int32 = 0;
+      var m: int64 = rn(4);
+      if (m == 0) { bn = 0; }
+      if (m == 1) { bn = 9; }
+      if (m == 2) { bn = -1; }
+      if (m == 3) { bn = 1000000; }
+      rc = cr_signed_verify(&out, &kidx, &g_keys[0], bn, purpose, text_of(s5, sl));
+      signed_expect_fail("signed bad nkeys", rc, CR_E_ARG, out, kidx, s5, sl);
+      var pe: uint8* = dup(pp, 1);
+      kidx = 55;
+      rc = cr_signed_verify(&out, &kidx, &g_keys[0], (int32)nk, text_of(pe, 0), text_of(s5, sl));
+      signed_expect_fail("signed empty purpose", rc, CR_E_ARG, out, kidx, s5, sl);
+      var pb: uint8* = gal(300);
+      rfill(pb, 300);
+      kidx = 55;
+      rc = cr_signed_verify(&out, &kidx, &g_keys[0], (int32)nk, text_of(pb, 256 + rn(40)), text_of(s5, sl));
+      signed_expect_fail("signed long purpose", rc, CR_E_ARG, out, kidx, s5, sl);
+      gfree(pe);
+      gfree(pb);
+      gfree(s5);
+    }
+    if (sc == 8) {
+      inl = sig_junk(&g_sbuf[0], 0);
+      var s8: uint8* = dup(&g_sbuf[0], inl);
+      rc = cr_signed_verify(&out, &kidx, &g_keys[0], (int32)nk, purpose, text_of(s8, inl));
+      signed_expect_fail("signed junk", rc, CR_E_VERIFY, out, kidx, s8, inl);
+      gfree(s8);
+    }
+    if (sc == 7) {
+      var un: int64 = 0;
+      rc = cr_signed_sign_until(&g_sbuf[0], 600, &un, &g_keys[ki], purpose, value, rn(1099511627776));
+      var s6: uint8* = dup(&g_sbuf[0], un);
+      rc = cr_signed_verify(&out, &kidx, &g_keys[0], (int32)nk, purpose, text_of(s6, un));
+      signed_expect_fail("signed given until form", rc, CR_E_VERIFY, out, kidx, s6, un);
+      gfree(s6);
+    }
+    gfree(pp);
+    gfree(vp);
+    tried = tried + 1;
+    r = r + 1;
+  }
+  report("signed", tried);
+}
+
+fn fuzz_signed_until() {
+  var tried: int64 = 0;
+  var r: int64 = 0;
+  while (r < FUZZ_ROUNDS) {
+    var nk: int64 = 1 + rn(8);
+    new_keys(8);
+    var ki: int64 = rn(nk);
+    var plen: int64 = 1 + rn(30);
+    var pp: uint8* = gal(plen);
+    rfill(pp, plen);
+    var vlen: int64 = rn(60);
+    var vp: uint8* = gal(vlen + 1);
+    rfill(vp, vlen);
+    if (rn(3) == 0 && vlen > 0) { vp[rn(vlen)] = 46; }
+    var purpose: string = text_of(pp, plen);
+    var value: string = text_of(vp, vlen);
+    var expires: int64 = rn(1099511627776);
+    if (rn(8) == 0) { expires = 9223372036854775807 - rn(4); }
+    if (rn(8) == 0) { expires = rn(3); }
+    var sl: int64 = 0;
+    var rc: int32 = cr_signed_sign_until(&g_sbuf[0], 600, &sl, &g_keys[ki], purpose, value, expires);
+    chk("until sign", rc == CR_OK && sl == vlen + CR_SIGNED_UNTIL_EXTRA, vp, vlen);
+    cp(&g_sbuf2[0], &g_sbuf[0], sl);
+    var now: int64 = expires - 1 - rn(100000);
+    var nm: int64 = rn(4);
+    if (nm == 1) { now = expires; }
+    if (nm == 2) { now = expires + rn(100000); }
+    if (nm == 3) { now = rn(2000000000) - 1000; }
+    var want: int32 = CR_E_EXPIRED;
+    if (now < expires) { want = CR_OK; }
+    var sc: int64 = rn(8);
+    var inl: int64 = sl;
+    var out: string = "x";
+    var kidx: int32 = 55;
+    if (sc == 0) {
+      var s: uint8* = dup(&g_sbuf[0], sl);
+      rc = cr_signed_verify_until(&out, &kidx, &g_keys[0], (int32)nk, purpose, text_of(s, sl), now);
+      if (want == CR_OK) {
+        chk("until valid", rc == CR_OK && kidx == (int32)ki && same(out.chars, (int64)out.length, vp, vlen), s, sl);
+      } else {
+        signed_expect_fail("until expired", rc, CR_E_EXPIRED, out, kidx, s, sl);
+      }
+      gfree(s);
+    }
+    if (sc == 1 || sc == 2) {
+      mutate(&g_sbuf[0], &inl, 600);
+      var s1: uint8* = dup(&g_sbuf[0], inl);
+      rc = cr_signed_verify_until(&out, &kidx, &g_keys[0], (int32)nk, purpose, text_of(s1, inl), now);
+      if (same(&g_sbuf[0], inl, &g_sbuf2[0], sl)) {
+        chk("until noop mutation", rc == want, s1, inl);
+      } else {
+        signed_expect_fail("until mutated", rc, CR_E_VERIFY, out, kidx, s1, inl);
+      }
+      gfree(s1);
+    }
+    if (sc == 3) {
+      inl = rn(150);
+      rfill(&g_sbuf[0], inl);
+      var s2: uint8* = dup(&g_sbuf[0], inl);
+      rc = cr_signed_verify_until(&out, &kidx, &g_keys[0], (int32)nk, purpose, text_of(s2, inl), now);
+      signed_expect_fail("until random", rc, CR_E_VERIFY, out, kidx, s2, inl);
+      gfree(s2);
+    }
+    if (sc == 4) {
+      var s3: uint8* = dup(&g_sbuf[0], sl);
+      var bn: int32 = 0;
+      var m: int64 = rn(3);
+      if (m == 1) { bn = 9; }
+      if (m == 2) { bn = -7; }
+      rc = cr_signed_verify_until(&out, &kidx, &g_keys[0], bn, purpose, text_of(s3, sl), now);
+      signed_expect_fail("until bad nkeys", rc, CR_E_ARG, out, kidx, s3, sl);
+      kidx = 55;
+      rc = cr_signed_verify_until(&out, &kidx, &g_keys[0], (int32)nk, text_of(pp, 0), text_of(s3, sl), now);
+      signed_expect_fail("until empty purpose", rc, CR_E_ARG, out, kidx, s3, sl);
+      gfree(s3);
+    }
+    if (sc == 5) {
+      var pl: int64 = 0;
+      cr_signed_sign(&g_sbuf[0], 600, &pl, &g_keys[ki], purpose, value);
+      var s4: uint8* = dup(&g_sbuf[0], pl);
+      rc = cr_signed_verify_until(&out, &kidx, &g_keys[0], (int32)nk, purpose, text_of(s4, pl), now);
+      signed_expect_fail("until given plain form", rc, CR_E_VERIFY, out, kidx, s4, pl);
+      gfree(s4);
+    }
+    if (sc == 7) {
+      inl = sig_junk(&g_sbuf[0], 1);
+      var s7: uint8* = dup(&g_sbuf[0], inl);
+      rc = cr_signed_verify_until(&out, &kidx, &g_keys[0], (int32)nk, purpose, text_of(s7, inl), now);
+      signed_expect_fail("until junk", rc, CR_E_VERIFY, out, kidx, s7, inl);
+      gfree(s7);
+    }
+    if (sc == 6) {
+      var s5: uint8* = dup(&g_sbuf[0], sl);
+      var shape: int64 = rn(4);
+      var pos: int64 = vlen + 1;
+      var bad: bool = true;
+      if (shape == 0) { s5[pos + rn(16)] = 65 + (uint8)rn(6); }
+      if (shape == 1) { s5[pos + rn(16)] = 45; }
+      if (shape == 2) { s5[pos + 16] = 0; }
+      if (shape == 3) { bad = false; }
+      rc = cr_signed_verify_until(&out, &kidx, &g_keys[0], (int32)nk, purpose, text_of(s5, sl), now);
+      if (same(s5, sl, &g_sbuf2[0], sl)) {
+        bad = false;
+      }
+      if (bad) {
+        signed_expect_fail("until edited expiry", rc, CR_E_VERIFY, out, kidx, s5, sl);
+      } else {
+        chk("until unedited expiry", rc == want, s5, sl);
+      }
+      gfree(s5);
+    }
+    gfree(pp);
+    gfree(vp);
+    tried = tried + 1;
+    r = r + 1;
+  }
+  report("signed_until", tried);
+}
+
+// ---- recipes: tokens and codes --------------------------------------------
+
+var g_a62: string = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+var g_a32: string = "0123456789abcdefghjkmnpqrstvwxyz";
+var g_pre: string = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+
+fn in_alpha(c: uint8, alphabet: int32) -> bool {
+  var a: string = g_a62;
+  if (alphabet == 2) { a = g_a32; }
+  var i: int64 = 0;
+  while (i < (int64)a.length) {
+    if (a.chars[i] == c) { return true; }
+    i = i + 1;
+  }
+  return false;
+}
+
+fn params_ok(alphabet: int32, nchars: int64) -> bool {
+  if (nchars < 1 || nchars > 256) { return false; }
+  if (alphabet == 1) { return nchars * 5954 / 1000 >= 128; }
+  if (alphabet == 2) { return nchars * 5 >= 128; }
+  return false;
+}
+
+fn ref_token(tok: uint8*, tl: int64, pre: uint8*, pl: int64, alphabet: int32, nchars: int64) -> bool {
+  if (!params_ok(alphabet, nchars)) { return false; }
+  if (tl != pl + nchars) { return false; }
+  var i: int64 = 0;
+  while (i < pl) {
+    if (tok[i] != pre[i]) { return false; }
+    i = i + 1;
+  }
+  while (i < tl) {
+    if (!in_alpha(tok[i], alphabet)) { return false; }
+    i = i + 1;
+  }
+  return true;
+}
+
+fn fuzz_token() {
+  var tried: int64 = 0;
+  var r: int64 = 0;
+  var tok: uint8[400];
+  var pre: uint8[40];
+  while (r < FUZZ_ROUNDS) {
+    var alphabet: int32 = (int32)(1 + rn(2));
+    var nchars: int64 = 22 + rn(40);
+    if (alphabet == 2) { nchars = 26 + rn(40); }
+    var pl: int64 = rn(33);
+    if (rn(3) == 0) { pl = 0; }
+    var i: int64 = 0;
+    while (i < pl) {
+      pre[i] = pick(g_pre);
+      i = i + 1;
+    }
+    var tl: int64 = 0;
+    var rc: int32 = cr_token_new(&tok[0], 400, &tl, text_of(&pre[0], pl), alphabet, nchars);
+    chk("token new", rc == CR_OK && tl == pl + nchars, &pre[0], pl);
+    var kind: int64 = rn(5);
+    if (kind == 1 || kind == 2) { mutate(&tok[0], &tl, 400); }
+    if (kind == 3) {
+      tl = pl + nchars + rn(5) - 2;
+      if (tl < 0) { tl = 0; }
+      i = pl;
+      while (i < tl) {
+        tok[i] = g_a62.chars[rn(62)];
+        if (alphabet == 2) { tok[i] = g_a32.chars[rn(32)]; }
+        i = i + 1;
+      }
+      var nb: int64 = rn(3);
+      while (nb > 0 && tl > 0) {
+        tok[rn(tl)] = rb();
+        nb = nb - 1;
+      }
+    }
+    if (kind == 4) {
+      tl = rn(300);
+      rfill(&tok[0], tl);
+    }
+    var cmode: int64 = rn(8);
+    var ca: int32 = alphabet;
+    var cn: int64 = nchars;
+    if (cmode == 0) {
+      var alts: int32[6] = [-1, 0, 3, 100, 1, 2];
+      ca = alts[rn(6)];
+    }
+    if (cmode == 1) {
+      var ns: int64[11] = [-1099511627776, -1, 0, 1, 21, 22, 25, 26, 255, 256, 257];
+      cn = ns[rn(11)];
+    }
+    if (cmode == 2) { cn = 1099511627776; }
+    if (cmode == 3) { cn = 9223372036854775807; }
+    if (cmode == 4) { cn = -9223372036854775807; }
+    var t: uint8* = dup(&tok[0], tl);
+    var pq: uint8* = dup(&pre[0], pl);
+    var got: bool = cr_token_check(text_of(t, tl), text_of(pq, pl), ca, cn);
+    var want: bool = ref_token(t, tl, pq, pl, ca, cn);
+    if (pl <= 32) {
+      chk("token check", got == want, t, tl);
+    } else {
+      chk("token check implies", !got || want, t, tl);
+    }
+    if (kind == 0 && cmode >= 5) {
+      chk("token valid", got, t, tl);
+    }
+    var bits: int64 = cr_token_bits(ca, cn);
+    chk("token bits", bits >= -1 && bits <= 1600, t, tl);
+    var hs: CrSha256;
+    chk("token hash", cr_token_hash(&hs, text_of(t, tl)) == CR_OK, t, tl);
+    gfree(t);
+    gfree(pq);
+    tried = tried + 1;
+    r = r + 1;
+  }
+  report("token", tried);
+}
+
+// Crockford rules. Returns the normalized length, -1 for a byte outside the rules.
+fn ref_norm(t: uint8*, n: int64, out: uint8*) -> int64 {
+  var o: int64 = 0;
+  var i: int64 = 0;
+  while (i < n) {
+    var c: uint8 = t[i];
+    i = i + 1;
+    if (c == 45 || c == 32) { continue; }
+    if (c >= 65 && c <= 90) { c = c + 32; }
+    if (c == 105 || c == 108) { c = 49; }
+    if (c == 111) { c = 48; }
+    if (!in_alpha(c, 2)) { return -1; }
+    if (o < 1000) { out[o] = c; }
+    o = o + 1;
+  }
+  return o;
+}
+
+fn code_one(txt: uint8*, n: int64, cap: int64) {
+  var rl: int64 = ref_norm(txt, n, &g_ref[0]);
+  var t: uint8* = dup(txt, n);
+  can_set(cap);
+  var ol: int64 = 777;
+  var rc: int32 = cr_code_normalize(g_o, cap, &ol, text_of(t, n));
+  chk("code status", is_status(rc), txt, n);
+  chk("code canary", can_ok(cap), txt, n);
+  if (rl >= 8 && rl <= 32) {
+    if (cap >= rl + 1) {
+      chk("code normalized", rc == CR_OK && ol == rl && same(g_o, ol, &g_ref[0], rl) && g_o[rl] == 0, txt, n);
+    } else {
+      chk("code small cap", rc == CR_E_SPACE && ol == 0 && out_zero(cap), txt, n);
+    }
+  } else {
+    var ok: bool = (rc == CR_E_DECODE || rc == CR_E_SPACE) && ol == 0 && out_zero(cap);
+    if (cap >= 40) { ok = ok && rc == CR_E_DECODE; }
+    chk("code refused", ok, txt, n);
+  }
+  gfree(t);
+}
+
+var g_pepper: CrKey32;
+
+fn code_hash_one(txt: uint8*, n: int64) {
+  var rl: int64 = ref_norm(txt, n, &g_ref[0]);
+  var t: uint8* = dup(txt, n);
+  var tag: CrHmacSha256;
+  tc_fill(&tag.b[0], 32, 165);
+  var rc: int32 = cr_code_hash(&tag, &g_pepper, text_of(t, n));
+  if (rl >= 8 && rl <= 32) {
+    var tag2: CrHmacSha256;
+    var rc2: int32 = cr_code_hash(&tag2, &g_pepper, text_of(&g_ref[0], rl));
+    chk("code hash", rc == CR_OK && rc2 == CR_OK && cr_equal(&tag.b[0], &tag2.b[0], 32), txt, n);
+  } else {
+    chk("code hash refused", rc == CR_E_DECODE && tc_all_zero(&tag.b[0], 32), txt, n);
+  }
+  gfree(t);
+}
+
+fn fuzz_code() {
+  var tried: int64 = 0;
+  var r: int64 = 0;
+  var buf: uint8[300];
+  var base: uint8[80];
+  var alpha: string = "0123456789abcdefghjkmnpqrstvwxyzABCDEFGHJKMNPQRSTVWXYZiIlLoO- -";
+  var bad: string = "uU_.=+/\\!@";
+  rfill(&g_pepper.b[0], 32);
+  while (r < FUZZ_ROUNDS) {
+    var kind: int64 = rn(4);
+    var n: int64 = 0;
+    if (kind == 0) {
+      n = rn(60);
+      rfill(&buf[0], n);
+    }
+    if (kind == 1 || kind == 2) {
+      var nc: int64 = 8 + rn(25);
+      var grp: int64 = 0;
+      if (rn(2) == 0) { grp = 2 + rn(15); }
+      var bl: int64 = 0;
+      var rc: int32 = cr_code_new(&base[0], 80, &bl, nc, grp);
+      chk("code new", rc == CR_OK, &base[0], bl);
+      cp(&buf[0], &base[0], bl);
+      n = bl;
+      if (kind == 1) {
+        var i: int64 = 0;
+        while (i < n) {
+          var c: uint8 = buf[i];
+          if (c >= 97 && c <= 122 && rn(3) == 0) { buf[i] = c - 32; }
+          var il: string = "iIlL";
+          var oo: string = "oO";
+          if (c == 49 && rn(2) == 0) { buf[i] = il.chars[rn(4)]; }
+          if (c == 48 && rn(2) == 0) { buf[i] = oo.chars[rn(2)]; }
+          i = i + 1;
+        }
+      } else {
+        mutate(&buf[0], &n, 300);
+      }
+    }
+    if (kind == 3) {
+      n = rn(50);
+      var j: int64 = 0;
+      while (j < n) {
+        buf[j] = pick(alpha);
+        j = j + 1;
+      }
+      var nb: int64 = rn(3);
+      while (nb > 0 && n > 0) {
+        buf[rn(n)] = pick(bad);
+        nb = nb - 1;
+      }
+    }
+    var cap: int64 = 40 + rn(30);
+    var cm: int64 = rn(5);
+    if (cm == 0) { cap = rn(40); }
+    if (cm == 1) { cap = 0; }
+    code_one(&buf[0], n, cap);
+    code_hash_one(&buf[0], n);
+    tried = tried + 1;
+    r = r + 1;
+  }
+  report("code", tried);
+}
+
+// ---- recipes: TOTP ---------------------------------------------------------
+
+fn totp_hit(code: uint8*, clen: int64, secret: uint8*, n: int64, step: int64, period: int32, digits: int32) -> bool {
+  if (clen != (int64)digits) { return false; }
+  var v: uint32 = 0;
+  if (cr_totp(&v, secret, n, step * (int64)period, period, digits) != CR_OK) { return false; }
+  var tmp: uint8[8];
+  var i: int32 = digits - 1;
+  var x: uint32 = v;
+  while (i >= 0) {
+    tmp[i] = (uint8)(48 + x % 10);
+    x = x / 10;
+    i = i - 1;
+  }
+  return same(&tmp[0], clen, code, clen);
+}
+
+fn totp_check(label: string, code: uint8*, clen: int64, secret: uint8*, n: int64, t: int64, period: int32, digits: int32, window: int32, use_ms: bool) {
+  var cur: int64 = t / (int64)period;
+  var hit: bool = false;
+  var k: int64 = -(int64)window;
+  var count: int64 = 0;
+  var hits: int64[21];
+  while (k <= (int64)window) {
+    if (totp_hit(code, clen, secret, n, cur + k, period, digits)) {
+      hit = true;
+      hits[count] = cur + k;
+      count = count + 1;
+    }
+    k = k + 1;
+  }
+  var cp0: uint8* = dup(code, clen);
+  var ms: int64 = 12345;
+  var got: bool = false;
+  if (use_ms) {
+    got = cr_totp_verify(text_of(cp0, clen), secret, n, t, period, digits, window, &ms);
+  } else {
+    got = cr_totp_verify(text_of(cp0, clen), secret, n, t, period, digits, window, 0);
+  }
+  if (hit) {
+    var in_set: bool = false;
+    var j: int64 = 0;
+    while (j < count) {
+      if (hits[j] == ms) { in_set = true; }
+      j = j + 1;
+    }
+    chk(label + " accepted", got && (!use_ms || in_set), code, clen);
+  } else {
+    chk(label + " rejected", !got && (!use_ms || ms == -1), code, clen);
+  }
+  gfree(cp0);
+}
+
+fn fuzz_totp() {
+  var tried: int64 = 0;
+  var r: int64 = 0;
+  var code: uint8[40];
+  while (r < FUZZ_ROUNDS) {
+    var n: int64 = 1 + rn(64);
+    var sec: uint8* = gal(n);
+    rfill(sec, n);
+    var t: int64 = 100000 + rn(34359738368);
+    var period: int32 = (int32)(1 + rn(300));
+    if (rn(2) == 0) { period = 30; }
+    var digits: int32 = (int32)(6 + rn(3));
+    var window: int32 = (int32)rn(11);
+    var cur: int64 = t / (int64)period;
+    var sc: int64 = rn(7);
+    var cl: int64 = 0;
+    var v: uint32 = 0;
+    var off: int64 = rn((int64)window * 2 + 5) - (int64)window - 2;
+    if (sc != 0 && sc != 5) { off = 0; }
+    cr_totp(&v, sec, n, (cur + off) * (int64)period, period, digits);
+    var i: int32 = digits - 1;
+    var x: uint32 = v;
+    while (i >= 0) {
+      code[i] = (uint8)(48 + x % 10);
+      x = x / 10;
+      i = i - 1;
+    }
+    cl = (int64)digits;
+    if (sc == 0 || sc == 5) {
+      totp_check("totp step", &code[0], cl, sec, n, t, period, digits, window, sc == 0);
+    }
+    if (sc == 1 || sc == 2) {
+      var ol: int64 = cl;
+      mutate(&code[0], &ol, 12);
+      totp_check("totp mutated", &code[0], ol, sec, n, t, period, digits, window, true);
+    }
+    if (sc == 3) {
+      cl = rn(14);
+      rfill(&code[0], cl);
+      totp_check("totp random", &code[0], cl, sec, n, t, period, digits, window, true);
+    }
+    if (sc == 4) {
+      cl = (int64)digits + rn(3) - 1;
+      i = 0;
+      while (i < cl) {
+        code[i] = (uint8)(48 + rn(10));
+        i = i + 1;
+      }
+      totp_check("totp digits", &code[0], cl, sec, n, t, period, digits, window, true);
+    }
+    if (sc == 6) {
+      var which: int64 = rn(8);
+      var bp: int32 = period;
+      var bd: int32 = digits;
+      var bw: int32 = window;
+      var bt: int64 = t;
+      var bn: int64 = n;
+      var m: int64 = rn(4);
+      if (which == 0) {
+        var ds: int32[4] = [0, 5, 9, -1];
+        bd = ds[m];
+      }
+      if (which == 1) {
+        var ps: int32[4] = [0, -1, 301, 1048576];
+        bp = ps[m];
+      }
+      if (which == 2) {
+        var ws: int32[4] = [-1, 11, 1073741824, -2147483647];
+        bw = ws[m];
+      }
+      if (which == 3) { bt = -1 - rn(1000000); }
+      if (which == 4) { bn = 65 + rn(3); }
+      if (which == 5) { bn = 0; }
+      if (which == 6) { bn = -1; }
+      if (which == 7) { bt = 9223372036854775807; }
+      var q: uint8* = dup(sec, n);
+      var ms: int64 = 12345;
+      var got: bool = false;
+      if (which == 4) {
+        var big: uint8* = gal(64);
+        rfill(big, 64);
+        got = cr_totp_verify(text_of(&code[0], cl), big, bn, bt, bp, bd, bw, &ms);
+        gfree(big);
+      } else {
+        got = cr_totp_verify(text_of(&code[0], cl), q, bn, bt, bp, bd, bw, &ms);
+      }
+      if (which != 7) {
+        chk("totp bad args", !got && ms == -1, &code[0], cl);
+      }
+      gfree(q);
+    }
+    gfree(sec);
+    tried = tried + 1;
+    r = r + 1;
+  }
+  report("totp", tried);
+}
+
+fn b32_val(c: uint8) -> int32 {
+  if (c >= 65 && c <= 90) { return (int32)c - 65; }
+  if (c >= 97 && c <= 122) { return (int32)c - 97; }
+  if (c >= 50 && c <= 55) { return (int32)c - 24; }
+  return -1;
+}
+
+// Reference base32: the length, -1 when invalid, -2 when no character is left.
+fn ref_b32(t: uint8*, n: int64, out: uint8*) -> int64 {
+  var acc: int32 = 0;
+  var bits: int32 = 0;
+  var cnt: int64 = 0;
+  var o: int64 = 0;
+  var i: int64 = 0;
+  while (i < n) {
+    var c: uint8 = t[i];
+    i = i + 1;
+    if (c == 45 || c == 32) { continue; }
+    var v: int32 = b32_val(c);
+    if (v < 0) { return -1; }
+    acc = ((acc << 5) | v) & 65535;
+    bits = bits + 5;
+    cnt = cnt + 1;
+    if (bits >= 8) {
+      bits = bits - 8;
+      out[o] = (uint8)((acc >> bits) & 255);
+      o = o + 1;
+    }
+  }
+  var rem: int64 = cnt % 8;
+  if (rem == 1 || rem == 3 || rem == 6) { return -1; }
+  if ((acc & ((1 << bits) - 1)) != 0) { return -1; }
+  if (cnt == 0) { return -2; }
+  return o;
+}
+
+fn b32_one(txt: uint8*, n: int64, cap: int64, secret: uint8*, sn: int64) {
+  var rl: int64 = ref_b32(txt, n, &g_ref[0]);
+  var t: uint8* = dup(txt, n);
+  can_set(cap);
+  var ol: int64 = 777;
+  var rc: int32 = cr_totp_secret_from_text(g_o, cap, &ol, text_of(t, n));
+  chk("b32 status", is_status(rc), txt, n);
+  chk("b32 canary", can_ok(cap), txt, n);
+  if (rl >= 0) {
+    if (cap >= rl) {
+      chk("b32 decoded", rc == CR_OK && ol == rl && same(g_o, ol, &g_ref[0], rl), txt, n);
+    } else {
+      chk("b32 small cap", rc == CR_E_SPACE && ol == 0 && out_zero(cap), txt, n);
+    }
+  }
+  if (rl == -1) {
+    var ok: bool = (rc == CR_E_DECODE || rc == CR_E_SPACE) && ol == 0 && out_zero(cap);
+    if (cap >= n) { ok = ok && rc == CR_E_DECODE; }
+    chk("b32 refused", ok, txt, n);
+  }
+  if (rl == -2) {
+    chk("b32 empty", (rc == CR_OK && ol == 0) || (rc != CR_OK && ol == 0 && out_zero(cap)), txt, n);
+  }
+  if (secret != 0 && rc == CR_OK) {
+    chk("b32 round trip", same(g_o, ol, secret, sn), txt, n);
+  }
+  gfree(t);
+}
+
+fn fuzz_totp_text() {
+  var tried: int64 = 0;
+  var r: int64 = 0;
+  var buf: uint8[400];
+  var sec: uint8[64];
+  var alpha: string = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz234567 -";
+  var bad: string = "=1089 \\/+.";
+  while (r < FUZZ_ROUNDS) {
+    var kind: int64 = rn(4);
+    var n: int64 = 0;
+    var sn: int64 = 0;
+    var known: bool = false;
+    if (kind == 0) {
+      n = rn(120);
+      rfill(&buf[0], n);
+    }
+    if (kind == 1 || kind == 2) {
+      sn = 1 + rn(40);
+      rfill(&sec[0], sn);
+      var tl: int64 = 0;
+      var rc: int32 = cr_totp_secret_text(&buf[0], 400, &tl, &sec[0], sn);
+      chk("b32 text", rc == CR_OK, &sec[0], sn);
+      n = tl;
+      if (kind == 1) {
+        known = true;
+        var i: int64 = 0;
+        while (i < n) {
+          if (rn(4) == 0 && buf[i] >= 65 && buf[i] <= 90) { buf[i] = buf[i] + 32; }
+          i = i + 1;
+        }
+      } else {
+        mutate(&buf[0], &n, 400);
+      }
+    }
+    if (kind == 3) {
+      n = rn(90);
+      var j: int64 = 0;
+      while (j < n) {
+        buf[j] = pick(alpha);
+        j = j + 1;
+      }
+      var nb: int64 = rn(3);
+      while (nb > 0 && n > 0) {
+        buf[rn(n)] = pick(bad);
+        nb = nb - 1;
+      }
+    }
+    var cap: int64 = 200;
+    var cm: int64 = rn(4);
+    if (cm == 0) { cap = rn(n / 2 + 2); }
+    if (cm == 1) { cap = 0; }
+    if (known) {
+      b32_one(&buf[0], n, 200, &sec[0], sn);
+    } else {
+      b32_one(&buf[0], n, cap, 0, 0);
+    }
+    tried = tried + 1;
+    r = r + 1;
+  }
+  report("totp_text", tried);
+}
+
+// ---- recipes: seal / open ---------------------------------------------------
+
+fn open_fail(label: string, rc: int32, ol: int64, cap: int64, p: uint8*, n: int64) {
+  chk(label, rc == CR_E_VERIFY && ol == 0 && out_zero(cap) && can_ok(cap), p, n);
+}
+
+fn fuzz_seal() {
+  var tried: int64 = 0;
+  var r: int64 = 0;
+  var key: CrKey32;
+  var key2: CrKey32;
+  var msg: uint8[100];
+  var ad: uint8[40];
+  var box: uint8[300];
+  var box2: uint8[300];
+  while (r < FUZZ_ROUNDS) {
+    rfill(&key.b[0], 32);
+    rfill(&key2.b[0], 32);
+    var ml: int64 = rn(90);
+    var al: int64 = rn(30);
+    rfill(&msg[0], ml);
+    rfill(&ad[0], al);
+    var bl: int64 = 0;
+    var adp: uint8* = &ad[0];
+    if (al == 0 && rn(2) == 0) { adp = 0; }
+    var rc: int32 = cr_seal(&box[0], 300, &bl, &msg[0], ml, adp, al, &key);
+    chk("seal", rc == CR_OK && bl == ml + CR_SEAL_OVERHEAD, &msg[0], ml);
+    cp(&box2[0], &box[0], bl);
+    var cap: int64 = bl + rn(20);
+    var sc: int64 = rn(7);
+    var inl: int64 = bl;
+    var ol: int64 = 777;
+    can_set(cap);
+    if (sc == 0) {
+      var b0: uint8* = dup(&box[0], bl);
+      rc = cr_open(g_o, cap, &ol, b0, bl, adp, al, &key);
+      chk("open valid", rc == CR_OK && same(g_o, ol, &msg[0], ml) && can_ok(cap), b0, bl);
+      gfree(b0);
+    }
+    if (sc == 1 || sc == 2) {
+      mutate(&box[0], &inl, 300);
+      var b1: uint8* = dup(&box[0], inl);
+      rc = cr_open(g_o, cap, &ol, b1, inl, adp, al, &key);
+      if (same(&box[0], inl, &box2[0], bl)) {
+        chk("open noop mutation", rc == CR_OK, b1, inl);
+      } else {
+        open_fail("open mutated", rc, ol, cap, b1, inl);
+      }
+      gfree(b1);
+    }
+    if (sc == 3) {
+      inl = rn(160);
+      rfill(&box[0], inl);
+      if (rn(2) == 0 && inl > 0) { box[0] = (uint8)CR_SEAL_VERSION; }
+      var b2: uint8* = dup(&box[0], inl);
+      can_set(200);
+      rc = cr_open(g_o, 200, &ol, b2, inl, adp, al, &key);
+      open_fail("open random", rc, ol, 200, b2, inl);
+      gfree(b2);
+    }
+    if (sc == 4) {
+      var b3: uint8* = dup(&box[0], bl);
+      rc = cr_open(g_o, cap, &ol, b3, bl, adp, al, &key2);
+      open_fail("open other key", rc, ol, cap, b3, bl);
+      gfree(b3);
+    }
+    if (sc == 5) {
+      var b4: uint8* = dup(&box[0], bl);
+      var ad2: uint8[40];
+      cp(&ad2[0], &ad[0], al);
+      var al2: int64 = al;
+      mutate(&ad2[0], &al2, 40);
+      var adq: uint8* = dup(&ad2[0], al2);
+      rc = cr_open(g_o, cap, &ol, b4, bl, adq, al2, &key);
+      if (same(&ad[0], al, &ad2[0], al2)) {
+        chk("open ad noop", rc == CR_OK, b4, bl);
+      } else {
+        open_fail("open other ad", rc, ol, cap, b4, bl);
+      }
+      gfree(b4);
+      gfree(adq);
+    }
+    if (sc == 6) {
+      var b5: uint8* = dup(&box[0], bl);
+      var small: int64 = ml - 1 - rn(ml + 1);
+      if (small < 0) { small = 0; }
+      can_set(small);
+      rc = cr_open(g_o, small, &ol, b5, bl, adp, al, &key);
+      if (ml == 0) {
+        chk("open exact cap 0", rc == CR_OK && ol == 0, b5, bl);
+      } else {
+        chk("open small cap", rc == CR_E_SPACE && ol == 0 && out_zero(small) && can_ok(small), b5, bl);
+      }
+      gfree(b5);
+    }
+    tried = tried + 1;
+    r = r + 1;
+  }
+  report("seal", tried);
+}
+
+// ---- password ---------------------------------------------------------------
+
+var g_pwtxt: uint8[200];
+
+fn std_b64(out: uint8*, inp: uint8*, n: int64) -> int64 {
+  var tmp: uint8[200];
+  var tl: int64 = 0;
+  cr_base64url_encode(&tmp[0], 200, &tl, inp, n);
+  var i: int64 = 0;
+  while (i < tl) {
+    var c: uint8 = tmp[i];
+    if (c == 45) { c = 43; }
+    if (c == 95) { c = 47; }
+    out[i] = c;
+    i = i + 1;
+  }
+  return tl;
+}
+
+// "$argon2id$v=19$m=<m>,t=<t>,p=1$<salt>$<hash>" with a real hash of pw.
+fn make_hash(h: CrPwHash*, pw: uint8*, pwl: int64, m: uint32, t: uint32) -> int64 {
+  var salt: uint8[16];
+  var hash: uint8[32];
+  rfill(&salt[0], 16);
+  var rc: int32 = crx_argon2id(&hash[0], 32, pw, pwl, &salt[0], 16, t, m);
+  tc_ok("pw small hash", rc == CR_OK);
+  var pos: int64 = lit(&g_pwtxt[0], "$argon2id$v=19$m=8,t=1,p=1$");
+  pos = pos + std_b64(&g_pwtxt[pos], &salt[0], 16);
+  g_pwtxt[pos] = 36;
+  pos = pos + 1;
+  pos = pos + std_b64(&g_pwtxt[pos], &hash[0], 32);
+  return pos;
+}
+
+fn load_hash(h: CrPwHash*, txt: uint8*, n: int64, terminate: bool) {
+  var i: int64 = 0;
+  while (i < 128) {
+    h->b[i] = 0;
+    if (!terminate) { h->b[i] = 65; }
+    i = i + 1;
+  }
+  var m: int64 = n;
+  if (m > 128) { m = 128; }
+  if (terminate && m > 127) { m = 127; }
+  cp(&h->b[0], txt, m);
+}
+
+// verify must be false and needs_rehash must not crash; from_text must be a status.
+fn pw_hostile(txt: uint8*, n: int64, pw: uint8*, pwl: int64, terminate: bool) {
+  var h: CrPwHash;
+  load_hash(&h, txt, n, terminate);
+  var pq: uint8* = dup(pw, pwl);
+  chk("pw hostile verify", !cr_pwhash_verify(&h, pq, pwl), txt, n);
+  var nr: bool = cr_pwhash_needs_rehash(&h, (int32)(1 + rn(3)));
+  chk("pw hostile rehash", nr || !nr, txt, n);
+  var h2: CrPwHash;
+  var t: uint8* = dup(txt, n);
+  var rc: int32 = cr_pwhash_from_text(&h2, text_of(t, n));
+  chk("pw from_text", rc == CR_OK || (rc == CR_E_DECODE && tc_all_zero(&h2.b[0], 128)), txt, n);
+  if (rc == CR_OK) {
+    chk("pw from_text verify", !cr_pwhash_verify(&h2, pq, pwl), txt, n);
+    var tx: string = cr_pwhash_text(&h2);
+    chk("pw text", tx.length <= 127, txt, n);
+  }
+  gfree(t);
+  gfree(pq);
+}
+
+fn pw_num(out: uint8*, v: int64) -> int64 {
+  return lit(out, "{v}");
+}
+
+fn fuzz_pwhash() {
+  var tried: int64 = 0;
+  var r: int64 = 0;
+  var pw: uint8[48];
+  var buf: uint8[200];
+  var base: CrPwHash;
+  while (r < FUZZ_ROUNDS) {
+    var pwl: int64 = rn(40);
+    rfill(&pw[0], pwl);
+    var sc: int64 = rn(8);
+    if (sc <= 2) {
+      var tl: int64 = make_hash(&base, &pw[0], pwl, 8, 1);
+      cp(&buf[0], &g_pwtxt[0], tl);
+      var n: int64 = tl;
+      var pq: uint8* = dup(&pw[0], pwl);
+      if (sc == 0) {
+        load_hash(&base, &buf[0], n, true);
+        chk("pw valid", cr_pwhash_verify(&base, pq, pwl), &buf[0], n);
+        var other: uint8[48];
+        cp(&other[0], &pw[0], pwl);
+        var ol: int64 = pwl;
+        mutate(&other[0], &ol, 48);
+        var oq: uint8* = dup(&other[0], ol);
+        if (!same(&pw[0], pwl, &other[0], ol)) {
+          chk("pw other password", !cr_pwhash_verify(&base, oq, ol), &buf[0], n);
+        }
+        gfree(oq);
+        chk("pw rehash small costs", cr_pwhash_needs_rehash(&base, (int32)(rn(6) - 1)), &buf[0], n);
+        chk("pw null password", !cr_pwhash_verify(&base, 0, 1), &buf[0], n);
+        chk("pw negative length", !cr_pwhash_verify(&base, pq, -1), &buf[0], n);
+        chk("pw null hash", !cr_pwhash_verify(0, pq, pwl), &buf[0], n);
+        chk("pw null hash rehash", cr_pwhash_needs_rehash(0, 1), &buf[0], n);
+        tc_fill(&base.b[0], 128, 66);
+        chk("pw unterminated", !cr_pwhash_verify(&base, pq, pwl) && cr_pwhash_needs_rehash(&base, 1), &buf[0], n);
+      } else {
+        var pos: int64 = 0;
+        var k: int64 = 1 + rn(4);
+        var alpha: string = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/$,=";
+        while (k > 0) {
+          var kind: int64 = rn(5);
+          if (kind <= 2 && n > 0) {
+            pos = rn(n);
+            if (pos != 17 && pos != 21) {
+              if (kind == 0) { buf[pos] = rb(); }
+              else { buf[pos] = pick(alpha); }
+            }
+          }
+          if (kind == 3 && n > 0) { n = rn(n); }
+          if (kind == 4 && n < 150) {
+            var add: int64 = 1 + rn(6);
+            var q: int64 = 0;
+            while (q < add) {
+              buf[n + q] = pick(alpha);
+              q = q + 1;
+            }
+            n = n + add;
+          }
+          k = k - 1;
+        }
+        var term: bool = rn(8) != 0;
+        load_hash(&base, &buf[0], n, term);
+        var eff: int64 = 0;
+        while (eff < 128 && base.b[eff] != 0) { eff = eff + 1; }
+        var noop: bool = eff < 128 && same(&base.b[0], eff, &g_pwtxt[0], tl);
+        var ok: bool = cr_pwhash_verify(&base, pq, pwl);
+        if (noop) {
+          chk("pw noop mutation", ok, &buf[0], n);
+        } else {
+          chk("pw mutated", !ok, &buf[0], n);
+        }
+        var h3: CrPwHash;
+        var t3: uint8* = dup(&buf[0], n);
+        var rc: int32 = cr_pwhash_from_text(&h3, text_of(t3, n));
+        chk("pw mutated from_text", rc == CR_OK || rc == CR_E_DECODE, &buf[0], n);
+        if (rc == CR_OK && !same(&buf[0], n, &g_pwtxt[0], tl)) {
+          chk("pw mutated from_text verify", !cr_pwhash_verify(&h3, pq, pwl), &buf[0], n);
+        }
+        gfree(t3);
+      }
+      gfree(pq);
+    }
+    if (sc == 3 || sc == 4) {
+      var n2: int64 = rn(135);
+      rfill(&buf[0], n2);
+      if (sc == 4 && n2 > 20) { var d: int64 = lit(&buf[0], "$argon2id$v=19$m="); chk("pw prefix", d == 17, &buf[0], n2); }
+      pw_hostile(&buf[0], n2, &pw[0], pwl, rn(4) != 0);
+    }
+    if (sc == 5 || sc == 6) {
+      var pos2: int64 = lit(&buf[0], "$argon2id$v=19$m=");
+      var ms: string[10] = ["8", "16", "64", "0", "7", "4194305", "99999999999", "008", "", "-1"];
+      var ts: string[9] = ["1", "2", "0", "65", "99999999999", "01", "", "x", "3"];
+      var ps: string[5] = ["1", "0", "2", "01", ""];
+      var mi: int64 = rn(10);
+      if (rn(3) != 0) { mi = rn(3); }
+      var ti: int64 = rn(9);
+      if (rn(3) != 0) { ti = rn(2); }
+      var pi: int64 = rn(5);
+      if (rn(3) != 0) { pi = 0; }
+      pos2 = pos2 + lit(&buf[pos2], ms[mi]);
+      pos2 = pos2 + lit(&buf[pos2], ",t=");
+      pos2 = pos2 + lit(&buf[pos2], ts[ti]);
+      pos2 = pos2 + lit(&buf[pos2], ",p=");
+      pos2 = pos2 + lit(&buf[pos2], ps[pi]);
+      buf[pos2] = 36;
+      pos2 = pos2 + 1;
+      var raw: uint8[70];
+      var sl: int64 = 4 + rn(30);
+      if (rn(2) == 0) { sl = 16; }
+      rfill(&raw[0], sl);
+      pos2 = pos2 + std_b64(&buf[pos2], &raw[0], sl);
+      if (rn(5) == 0) { buf[pos2 - 1] = 61; }
+      buf[pos2] = 36;
+      pos2 = pos2 + 1;
+      var hl: int64 = 8 + rn(30);
+      if (rn(2) == 0) { hl = 32; }
+      rfill(&raw[0], hl);
+      pos2 = pos2 + std_b64(&buf[pos2], &raw[0], hl);
+      if (rn(5) == 0) { buf[pos2 - 1 - rn(3)] = 33; }
+      pw_hostile(&buf[0], pos2, &pw[0], pwl, true);
+    }
+    if (sc == 7) {
+      var pos3: int64 = lit(&buf[0], "$argon2id$v=19$m=");
+      var preset: int32 = (int32)(1 + rn(3));
+      var mems: int64[3] = [65536, 262144, 1048576];
+      var opss: int64[3] = [2, 3, 4];
+      var m: int64 = mems[preset - 1];
+      var t: int64 = opss[preset - 1];
+      if (rn(3) == 0) { m = mems[rn(3)]; }
+      if (rn(3) == 0) { t = opss[rn(3)]; }
+      if (rn(5) == 0) { m = m + 1; }
+      pos3 = pos3 + pw_num(&buf[pos3], m);
+      pos3 = pos3 + lit(&buf[pos3], ",t=");
+      pos3 = pos3 + pw_num(&buf[pos3], t);
+      pos3 = pos3 + lit(&buf[pos3], ",p=1$");
+      var raw2: uint8[70];
+      var sl2: int64 = 16;
+      if (rn(4) == 0) { sl2 = 8 + rn(20); }
+      rfill(&raw2[0], sl2);
+      pos3 = pos3 + std_b64(&buf[pos3], &raw2[0], sl2);
+      buf[pos3] = 36;
+      pos3 = pos3 + 1;
+      var hl2: int64 = 32;
+      if (rn(4) == 0) { hl2 = 16 + rn(20); }
+      rfill(&raw2[0], hl2);
+      pos3 = pos3 + std_b64(&buf[pos3], &raw2[0], hl2);
+      var hh: CrPwHash;
+      load_hash(&hh, &buf[0], pos3, true);
+      var want_same: bool = m == mems[preset - 1] && t == opss[preset - 1] && sl2 == 16 && hl2 == 32;
+      chk("pw rehash well formed", cr_pwhash_needs_rehash(&hh, preset) == !want_same, &buf[0], pos3);
+      chk("pw rehash bad preset", cr_pwhash_needs_rehash(&hh, (int32)(4 + rn(100))), &buf[0], pos3);
+    }
+    tried = tried + 1;
+    r = r + 1;
+  }
+  report("pwhash", tried);
+}
+
+// ---- aead -------------------------------------------------------------------
+
+var g_k32: CrKey32;
+var g_n24: CrNonce24;
+var g_n12: CrNonce12;
+var g_gcm: CrAesGcm;
+var g_gcm_len: int64 = 16;
+
+fn aead_enc(kind: int64, ct: uint8*, cap: int64, cl: int64*, msg: uint8*, ml: int64, ad: uint8*, al: int64) -> int32 {
+  if (kind == 0) { return cr_aead_encrypt(ct, cap, cl, msg, ml, ad, al, &g_n24, &g_k32); }
+  if (kind == 1) { return cr_chacha20poly1305_encrypt(ct, cap, cl, msg, ml, ad, al, &g_n12, &g_k32); }
+  return cr_aes_gcm_encrypt(&g_gcm, ct, cap, cl, msg, ml, ad, al, &g_n12);
+}
+
+fn aead_dec(kind: int64, pt: uint8*, cap: int64, pl: int64*, ct: uint8*, cl: int64, ad: uint8*, al: int64) -> int32 {
+  if (kind == 0) { return cr_aead_decrypt(pt, cap, pl, ct, cl, ad, al, &g_n24, &g_k32); }
+  if (kind == 1) { return cr_chacha20poly1305_decrypt(pt, cap, pl, ct, cl, ad, al, &g_n12, &g_k32); }
+  return cr_aes_gcm_decrypt(&g_gcm, pt, cap, pl, ct, cl, ad, al, &g_n12);
+}
+
+fn aead_setup(kind: int64) {
+  rfill(&g_k32.b[0], 32);
+  rfill(&g_n24.b[0], 24);
+  rfill(&g_n12.b[0], 12);
+  if (kind == 2) {
+    g_gcm_len = 16;
+    if (rn(2) == 0) { g_gcm_len = 32; }
+    cr_aes_gcm_init(&g_gcm, &g_k32.b[0], g_gcm_len);
+  }
+}
+
+fn aead_fail(label: string, rc: int32, want: int32, pl: int64, cap: int64, p: uint8*, n: int64) {
+  chk(label, rc == want && pl == 0 && out_zero(cap) && can_ok(cap), p, n);
+}
+
+fn fuzz_aead() {
+  var tried: int64 = 0;
+  var r: int64 = 0;
+  var msg: uint8[130];
+  var ad: uint8[50];
+  var ct: uint8[300];
+  var ct2: uint8[300];
+  while (r < FUZZ_ROUNDS) {
+    var kind: int64 = r % 3;
+    aead_setup(kind);
+    var ml: int64 = rn(120);
+    var al: int64 = rn(40);
+    rfill(&msg[0], ml);
+    rfill(&ad[0], al);
+    var adp: uint8* = &ad[0];
+    if (al == 0 && rn(2) == 0) { adp = 0; }
+    var cl: int64 = 0;
+    var rc: int32 = aead_enc(kind, &ct[0], 300, &cl, &msg[0], ml, adp, al);
+    chk("aead encrypt", rc == CR_OK && cl == ml + 16, &msg[0], ml);
+    cp(&ct2[0], &ct[0], cl);
+    var sc: int64 = rn(9);
+    var inl: int64 = cl;
+    var pl: int64 = 777;
+    var cap: int64 = 300;
+    can_set(cap);
+    if (sc == 0) {
+      cap = ml + rn(10);
+      can_set(cap);
+      var c0: uint8* = dup(&ct[0], cl);
+      rc = aead_dec(kind, g_o, cap, &pl, c0, cl, adp, al);
+      chk("aead valid", rc == CR_OK && same(g_o, pl, &msg[0], ml) && can_ok(cap), c0, cl);
+      gfree(c0);
+    }
+    if (sc == 1 || sc == 2) {
+      mutate(&ct[0], &inl, 300);
+      var c1: uint8* = dup(&ct[0], inl);
+      rc = aead_dec(kind, g_o, cap, &pl, c1, inl, adp, al);
+      if (same(&ct[0], inl, &ct2[0], cl)) {
+        chk("aead noop mutation", rc == CR_OK, c1, inl);
+      } else {
+        aead_fail("aead mutated", rc, CR_E_VERIFY, pl, cap, c1, inl);
+      }
+      gfree(c1);
+    }
+    if (sc == 3) {
+      inl = rn(200);
+      rfill(&ct[0], inl);
+      var pat: int64 = rn(4);
+      if (pat == 1) { tc_fill(&ct[0], inl, 0); }
+      if (pat == 2) { tc_fill(&ct[0], inl, 255); }
+      if (pat == 3 && inl > 16) { tc_fill(&ct[inl - 16], 16, 0); }
+      var c2: uint8* = dup(&ct[0], inl);
+      rc = aead_dec(kind, g_o, cap, &pl, c2, inl, adp, al);
+      aead_fail("aead random", rc, CR_E_VERIFY, pl, cap, c2, inl);
+      gfree(c2);
+    }
+    if (sc == 4) {
+      var ad2: uint8[50];
+      cp(&ad2[0], &ad[0], al);
+      var al2: int64 = al;
+      mutate(&ad2[0], &al2, 50);
+      var adq: uint8* = dup(&ad2[0], al2);
+      var c3: uint8* = dup(&ct[0], cl);
+      rc = aead_dec(kind, g_o, cap, &pl, c3, cl, adq, al2);
+      if (same(&ad[0], al, &ad2[0], al2)) {
+        chk("aead ad noop", rc == CR_OK, c3, cl);
+      } else {
+        aead_fail("aead other ad", rc, CR_E_VERIFY, pl, cap, c3, cl);
+      }
+      gfree(adq);
+      gfree(c3);
+    }
+    if (sc == 5) {
+      var c4: uint8* = dup(&ct[0], cl);
+      var nn: CrNonce24;
+      cp(&nn.b[0], &g_n24.b[0], 24);
+      var nn12: CrNonce12;
+      cp(&nn12.b[0], &g_n12.b[0], 12);
+      if (kind == 0) { flips(&g_n24.b[0], 24); } else { flips(&g_n12.b[0], 12); }
+      var nsame: bool = same(&nn.b[0], 24, &g_n24.b[0], 24) && same(&nn12.b[0], 12, &g_n12.b[0], 12);
+      rc = aead_dec(kind, g_o, cap, &pl, c4, cl, adp, al);
+      if (nsame) {
+        chk("aead nonce noop", rc == CR_OK, c4, cl);
+      } else {
+        aead_fail("aead other nonce", rc, CR_E_VERIFY, pl, cap, c4, cl);
+      }
+      gfree(c4);
+    }
+    if (sc == 6) {
+      var c5: uint8* = dup(&ct[0], cl);
+      var kk: CrKey32;
+      cp(&kk.b[0], &g_k32.b[0], 32);
+      var kl: int64 = 32;
+      if (kind == 2) { kl = g_gcm_len; }
+      flips(&kk.b[0], kl);
+      var ksame: bool = same(&kk.b[0], kl, &g_k32.b[0], kl);
+      if (kind == 2) {
+        cr_aes_gcm_init(&g_gcm, &kk.b[0], g_gcm_len);
+      } else {
+        cp(&g_k32.b[0], &kk.b[0], 32);
+      }
+      rc = aead_dec(kind, g_o, cap, &pl, c5, cl, adp, al);
+      if (ksame) {
+        chk("aead key noop", rc == CR_OK, c5, cl);
+      } else {
+        aead_fail("aead other key", rc, CR_E_VERIFY, pl, cap, c5, cl);
+      }
+      gfree(c5);
+    }
+    if (sc == 7 && ml > 0) {
+      var c6: uint8* = dup(&ct[0], cl);
+      cap = rn(ml);
+      can_set(cap);
+      rc = aead_dec(kind, g_o, cap, &pl, c6, cl, adp, al);
+      aead_fail("aead small cap", rc, CR_E_SPACE, pl, cap, c6, cl);
+      gfree(c6);
+    }
+    if (sc == 8) {
+      var c7: uint8* = dup(&ct[0], cl);
+      var m: int64 = rn(3);
+      if (m == 0) {
+        rc = aead_dec(kind, g_o, cap, &pl, c7, cl, 0, 1 + rn(20));
+        aead_fail("aead null ad", rc, CR_E_ARG, pl, cap, c7, cl);
+      }
+      if (m == 1) {
+        rc = aead_dec(kind, g_o, cap, &pl, c7, cl, adp, -1 - rn(20));
+        aead_fail("aead negative ad", rc, CR_E_ARG, pl, cap, c7, cl);
+      }
+      if (m == 2) {
+        rc = aead_dec(kind, g_o, cap, &pl, c7, -1 - rn(20), adp, al);
+        aead_fail("aead negative ct", rc, CR_E_ARG, pl, cap, c7, cl);
+      }
+      gfree(c7);
+    }
+    tried = tried + 1;
+    r = r + 1;
+  }
+  report("aead", tried);
+}
+
+// ---- ecc: X25519 and Ed25519 ---------------------------------------------------
+
+fn fuzz_x25519() {
+  var tried: int64 = 0;
+  var r: int64 = 0;
+  var low: string[7] = [
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0100000000000000000000000000000000000000000000000000000000000000",
+    "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+    "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+    "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
+  ];
+  var sk: CrX25519Secret;
+  var pk: CrX25519Public;
+  var peer: CrX25519Public;
+  var sh: CrX25519Shared;
+  while (r < FUZZ_ROUNDS) {
+    rfill(&sk.b[0], 32);
+    cr_x25519_public_from_secret(&pk, &sk);
+    var sc: int64 = rn(5);
+    var is_low: bool = false;
+    var noop: bool = false;
+    if (sc == 0) { rfill(&peer.b[0], 32); }
+    if (sc == 1) {
+      cp(&peer.b[0], &pk.b[0], 32);
+      flips(&peer.b[0], 32);
+      noop = same(&peer.b[0], 32, &pk.b[0], 32);
+    }
+    if (sc == 2 || sc == 3) {
+      tc_unhex(low[rn(7)], &peer.b[0], 32);
+      if (sc == 3) { peer.b[31] = (uint8)(peer.b[31] | 128); }
+      is_low = true;
+    }
+    if (sc == 4) {
+      tc_fill(&peer.b[0], 32, (int32)rn(256));
+    }
+    var pq: CrX25519Public;
+    cp(&pq.b[0], &peer.b[0], 32);
+    tc_fill(&sh.b[0], 32, 165);
+    var rc: int32 = cr_x25519_shared(&sh, &sk, &pq);
+    chk("x25519 status", rc == CR_OK || rc == CR_E_KEY, &peer.b[0], 32);
+    if (rc == CR_E_KEY) { chk("x25519 wiped", tc_all_zero(&sh.b[0], 32), &peer.b[0], 32); }
+    if (rc == CR_OK) { chk("x25519 nonzero", !tc_all_zero(&sh.b[0], 32), &peer.b[0], 32); }
+    if (is_low) { chk("x25519 low order", rc == CR_E_KEY, &peer.b[0], 32); }
+    if (sc == 0 || (sc == 1 && !noop)) { chk("x25519 random peer", rc == CR_OK, &peer.b[0], 32); }
+    if (r % 50 == 0) {
+      tc_fill(&sh.b[0], 32, 165);
+      chk("x25519 null sk", cr_x25519_shared(&sh, 0, &pq) == CR_E_ARG, &peer.b[0], 32);
+      chk("x25519 null peer", cr_x25519_shared(&sh, &sk, 0) == CR_E_ARG, &peer.b[0], 32);
+      chk("x25519 null out", cr_x25519_shared(0, &sk, &pq) == CR_E_ARG, &peer.b[0], 32);
+    }
+    tried = tried + 1;
+    r = r + 1;
+  }
+  report("x25519", tried);
+}
+
+struct EdFx {
+  seed: uint8[32];
+  pk: uint8[32];
+  msg: uint8[90];
+  ml: int64;
+  sig: uint8[64];
+}
+
+var g_edfx: EdFx[4];
+
+fn ed_verify(sig: uint8*, msg: uint8*, n: int64, pk: uint8*) -> bool {
+  var s: CrEd25519Sig;
+  var k: CrEd25519Public;
+  cp(&s.b[0], sig, 64);
+  cp(&k.b[0], pk, 32);
+  return cr_ed25519_verify(&s, msg, n, &k);
+}
+
+fn fuzz_ed25519() {
+  var tried: int64 = 0;
+  var r: int64 = 0;
+  var i: int64 = 0;
+  while (i < 4) {
+    var f: EdFx* = &g_edfx[i];
+    rfill(&f->seed[0], 32);
+    f->ml = rn(80);
+    rfill(&f->msg[0], f->ml);
+    var seed: CrSeed32;
+    cp(&seed.b[0], &f->seed[0], 32);
+    var pk: CrEd25519Public;
+    var sk: CrEd25519Secret;
+    var sg: CrEd25519Sig;
+    cr_ed25519_seed_keypair(&pk, &sk, &seed);
+    cr_ed25519_sign(&sg, &f->msg[0], f->ml, &sk);
+    cp(&f->pk[0], &pk.b[0], 32);
+    cp(&f->sig[0], &sg.b[0], 64);
+    i = i + 1;
+  }
+  var tors: string[6] = [
+    "0100000000000000000000000000000000000000000000000000000000000000",
+    "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000080",
+    "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05"
+  ];
+  var sg2: uint8[64];
+  var pk2: uint8[32];
+  var mb: uint8[100];
+  while (r < FUZZ_ROUNDS) {
+    var f2: EdFx* = &g_edfx[rn(4)];
+    cp(&sg2[0], &f2->sig[0], 64);
+    cp(&pk2[0], &f2->pk[0], 32);
+    var ml: int64 = f2->ml;
+    cp(&mb[0], &f2->msg[0], ml);
+    var sc: int64 = rn(10);
+    var msg_noop: bool = true;
+    if (sc == 1 || sc == 2) { flips(&sg2[0], 64); }
+    if (sc == 3) { flips(&pk2[0], 32); }
+    if (sc == 4) { rfill(&sg2[0], 64); }
+    if (sc == 5) { rfill(&pk2[0], 32); }
+    if (sc == 6) {
+      mutate(&mb[0], &ml, 100);
+      msg_noop = same(&mb[0], ml, &f2->msg[0], f2->ml);
+    }
+    if (sc == 7) {
+      tc_unhex(tors[rn(6)], &pk2[0], 32);
+      if (rn(2) == 0) { tc_unhex(tors[rn(6)], &sg2[0], 32); }
+      if (rn(2) == 0) { tc_fill(&sg2[32], 32, 0); }
+    }
+    if (sc == 8) {
+      sg2[63] = (uint8)(sg2[63] | (240 + rn(16)));
+      if (rn(2) == 0) { sg2[31] = (uint8)(sg2[31] ^ 128); }
+    }
+    var m: uint8* = dup(&mb[0], ml);
+    var got: bool = ed_verify(&sg2[0], m, ml, &pk2[0]);
+    var valid: bool = same(&sg2[0], 64, &f2->sig[0], 64) && same(&pk2[0], 32, &f2->pk[0], 32) && msg_noop;
+    if (sc == 9) {
+      var which: int64 = rn(4);
+      var s9: CrEd25519Sig;
+      var k9: CrEd25519Public;
+      cp(&s9.b[0], &sg2[0], 64);
+      cp(&k9.b[0], &pk2[0], 32);
+      if (which == 0) { got = cr_ed25519_verify(&s9, 0, 1 + rn(10), &k9); }
+      if (which == 1) { got = cr_ed25519_verify(&s9, m, -1 - rn(10), &k9); }
+      if (which == 2) { got = cr_ed25519_verify(0, m, ml, &k9); }
+      if (which == 3) { got = cr_ed25519_verify(&s9, m, ml, 0); }
+      valid = false;
+    }
+    chk("ed25519 verdict", got == valid, &sg2[0], 64);
+    gfree(m);
+    tried = tried + 1;
+    r = r + 1;
+  }
+  report("ed25519", tried);
+}
+
+// ---- ecc: P-256 and P-384 -----------------------------------------------------
+
+struct EcFx {
+  sk: uint8[48];
+  pk: uint8[100];
+  pkl: int64;
+  msg: uint8[90];
+  ml: int64;
+  sig: uint8[330];
+  sl: int64[3];
+}
+
+var g_fx256: EcFx[4];
+var g_fx384: EcFx[4];
+var g_n256: uint8[32];
+var g_n384: uint8[48];
+
+fn ec_pk_len(curve: int64) -> int64 {
+  if (curve == 256) { return 65; }
+  return 97;
+}
+
+fn ec_make_fixtures(curve: int64) {
+  var i: int64 = 0;
+  while (i < 4) {
+    var f: EcFx* = &g_fx256[i];
+    if (curve == 384) { f = &g_fx384[i]; }
+    var nb: int64 = 32;
+    if (curve == 384) { nb = 48; }
+    var rc: int32 = CR_E_KEY;
+    var tries: int64 = 0;
+    while (rc != CR_OK && tries < 20) {
+      rfill(&f->sk[0], nb);
+      if (curve == 256) {
+        var s: CrP256Secret;
+        cp(&s.b[0], &f->sk[0], 32);
+        rc = cr_p256_public_from_secret(&f->pk[0], 100, &s);
+      } else {
+        var s4: CrP384Secret;
+        cp(&s4.b[0], &f->sk[0], 48);
+        rc = cr_p384_public_from_secret(&f->pk[0], 100, &s4);
+      }
+      tries = tries + 1;
+    }
+    tc_rc("fixture key", rc, CR_OK);
+    f->pkl = ec_pk_len(curve);
+    f->ml = rn(80);
+    rfill(&f->msg[0], f->ml);
+    var h: int64 = 0;
+    while (h < 3) {
+      var sl: int64 = 0;
+      if (curve == 256) {
+        var s2: CrP256Secret;
+        cp(&s2.b[0], &f->sk[0], 32);
+        rc = cr_p256_ecdsa_sign(&f->sig[h * 110], 110, &sl, &f->msg[0], f->ml, (int32)(h + 1), &s2);
+      } else {
+        var s5: CrP384Secret;
+        cp(&s5.b[0], &f->sk[0], 48);
+        rc = cr_p384_ecdsa_sign(&f->sig[h * 110], 110, &sl, &f->msg[0], f->ml, (int32)(h + 1), &s5);
+      }
+      tc_rc("fixture sign", rc, CR_OK);
+      f->sl[h] = sl;
+      h = h + 1;
+    }
+    i = i + 1;
+  }
+}
+
+fn ec_verify(curve: int64, sig: uint8*, sl: int64, msg: uint8*, n: int64, hash: int32, pk: uint8*, pkl: int64) -> bool {
+  if (curve == 256) { return cr_p256_ecdsa_verify(sig, sl, msg, n, hash, pk, pkl); }
+  return cr_p384_ecdsa_verify(sig, sl, msg, n, hash, pk, pkl);
+}
+
+// ECDH with the fixture's secret (or sk when non-null). Returns the status; *wiped tells
+// whether the shared buffer was all zero afterwards.
+fn ec_ecdh(curve: int64, sk: uint8*, peer: uint8*, pl: int64, wiped: bool*, canary_ok: bool*) -> int32 {
+  var rc: int32 = 0;
+  if (curve == 256) {
+    var s: CrP256Secret;
+    cp(&s.b[0], sk, 32);
+    var k: CrKey32;
+    tc_fill(&k.b[0], 32, 165);
+    rc = cr_p256_ecdh(&k, &s, peer, pl);
+    *wiped = tc_all_zero(&k.b[0], 32);
+    *canary_ok = true;
+  } else {
+    var s4: CrP384Secret;
+    cp(&s4.b[0], sk, 48);
+    can_set(48);
+    rc = cr_p384_ecdh(g_o, 48, &s4, peer, pl);
+    *wiped = out_zero(48);
+    *canary_ok = can_ok(48);
+  }
+  return rc;
+}
+
+// A hostile public key / ECDH peer. fx is a valid fixture for the curve. Returns the length.
+fn pt_junk(b: uint8*, curve: int64, f: EcFx*) -> int64 {
+  var pkl: int64 = ec_pk_len(curve);
+  var nb: int64 = (pkl - 1) / 2;
+  var kind: int64 = rn(8);
+  var n: int64 = 0;
+  if (kind == 0) {
+    n = rn(201);
+    rfill(b, n);
+    if (n > 0) { b[0] = (uint8)rn(8); }
+  }
+  if (kind == 1) {
+    n = pkl;
+    rfill(b, n);
+    b[0] = (uint8)rn(8);
+  }
+  if (kind == 2) {
+    n = pkl;
+    rfill(b, n);
+    b[0] = 4;
+  }
+  if (kind == 3 || kind == 4) {
+    cp(b, &f->pk[0], pkl);
+    n = pkl;
+    if (kind == 3 || rn(4) != 0) { mutate(b, &n, 200); }
+  }
+  if (kind == 5) {
+    cp(b, &f->pk[0], pkl);
+    n = pkl;
+    var which: int64 = rn(3);
+    var fillv: int32 = 0;
+    if (rn(2) == 0) { fillv = 255; }
+    if (which == 0 || which == 2) { tc_fill(&b[1], nb, fillv); }
+    if (which == 1 || which == 2) { tc_fill(&b[1 + nb], nb, fillv); }
+  }
+  if (kind == 6) {
+    cp(b, &f->pk[0], pkl);
+    n = nb + 1;
+    b[0] = (uint8)(2 + rn(2));
+    if (rn(3) == 0) { b[0] = 4; }
+  }
+  if (kind == 7) {
+    cp(b, &f->pk[0], pkl);
+    n = pkl;
+    b[0] = (uint8)rn(8);
+    if (b[0] == 4) { b[0] = 6; }
+  }
+  return n;
+}
+
+fn fuzz_ecdh(curve: int64) {
+  var tried: int64 = 0;
+  var r: int64 = 0;
+  var pt: uint8[260];
+  var fxs: EcFx* = &g_fx256[0];
+  if (curve == 384) { fxs = &g_fx384[0]; }
+  var nb: int64 = 32;
+  if (curve == 384) { nb = 48; }
+  while (r < FUZZ_ROUNDS) {
+    var f: EcFx* = &fxs[rn(4)];
+    var n: int64 = pt_junk(&pt[0], curve, f);
+    var q: uint8* = dup(&pt[0], n);
+    var wiped: bool = false;
+    var cok: bool = false;
+    var rc: int32 = ec_ecdh(curve, &f->sk[0], q, n, &wiped, &cok);
+    var noop: bool = same(&pt[0], n, &f->pk[0], f->pkl);
+    chk("ecdh status", rc == CR_OK || rc == CR_E_KEY, q, n);
+    chk("ecdh canary", cok, q, n);
+    if (noop) {
+      chk("ecdh valid peer", rc == CR_OK && !wiped, q, n);
+    } else {
+      chk("ecdh hostile peer", rc == CR_E_KEY && wiped, q, n);
+    }
+    gfree(q);
+    if (r % 10 == 0) {
+      var sk2: uint8[48];
+      var m: int64 = rn(4);
+      tc_fill(&sk2[0], 48, 0);
+      if (m == 1) { tc_fill(&sk2[0], 48, 255); }
+      if (m == 2) { if (curve == 256) { cp(&sk2[0], &g_n256[0], 32); } else { cp(&sk2[0], &g_n384[0], 48); } }
+      if (m == 3) {
+        if (curve == 256) { cp(&sk2[0], &g_n256[0], 32); } else { cp(&sk2[0], &g_n384[0], 48); }
+        sk2[nb - 1] = (uint8)(sk2[nb - 1] + 1 + rn(10));
+      }
+      var vq: uint8* = dup(&f->pk[0], f->pkl);
+      rc = ec_ecdh(curve, &sk2[0], vq, f->pkl, &wiped, &cok);
+      chk("ecdh bad scalar", rc == CR_E_KEY && wiped && cok, &sk2[0], nb);
+      gfree(vq);
+    }
+    tried = tried + 1;
+    r = r + 1;
+  }
+  if (curve == 256) { report("p256_ecdh", tried); } else { report("p384_ecdh", tried); }
+}
+
+fn put_int(b: uint8*, pos: int64, v: uint8*, vl: int64) -> int64 {
+  var skip: int64 = 0;
+  while (skip < vl - 1 && v[skip] == 0) { skip = skip + 1; }
+  var body: int64 = vl - skip;
+  var pad: int64 = 0;
+  if (v[skip] >= 128) { pad = 1; }
+  b[pos] = 2;
+  b[pos + 1] = (uint8)(body + pad);
+  var p: int64 = pos + 2;
+  if (pad == 1) {
+    b[p] = 0;
+    p = p + 1;
+  }
+  cp(&b[p], &v[skip], body);
+  return p + body;
+}
+
+// Structured junk shaped like a DER ECDSA signature.
+fn der_junk(b: uint8*, nb: int64, order: uint8*) -> int64 {
+  var v: int64 = rn(9);
+  var tmp: uint8[120];
+  var body: uint8[200];
+  if (v == 0) {
+    b[0] = 48;
+    b[1] = rb();
+    var k: int64 = rn(70);
+    rfill(&b[2], k);
+    return 2 + k;
+  }
+  if (v == 8) {
+    var rr: uint8[48];
+    var ss: uint8[48];
+    var which: int64 = 0;
+    while (which < 2) {
+      var pick: int64 = rn(7);
+      var d: uint8* = &rr[0];
+      if (which == 1) { d = &ss[0]; }
+      tc_fill(d, nb, 0);
+      if (pick == 1) { d[nb - 1] = 1; }
+      if (pick >= 2 && pick <= 5) {
+        cp(d, order, nb);
+        if (pick == 2) { d[nb - 1] = (uint8)(d[nb - 1] - 1); }
+        if (pick == 4) { d[nb - 1] = (uint8)(d[nb - 1] + 1); }
+        if (pick == 5) { d[0] = 255; }
+      }
+      if (pick == 6) { tc_fill(d, nb, 255); }
+      which = which + 1;
+    }
+    var bl: int64 = put_int(&body[0], 0, &rr[0], nb);
+    bl = put_int(&body[0], bl, &ss[0], nb);
+    b[0] = 48;
+    b[1] = (uint8)bl;
+    cp(&b[2], &body[0], bl);
+    return 2 + bl;
+  }
+  var rl: int64 = rn(nb + 4);
+  var sl: int64 = rn(nb + 4);
+  var bp: int64 = 0;
+  var t1: uint8 = 2;
+  var t2: uint8 = 2;
+  if (v == 7) {
+    var tags: uint8[8] = [2, 3, 4, 5, 48, 49, 160, 2];
+    t1 = tags[rn(8)];
+    t2 = tags[rn(8)];
+    if (rn(3) == 0) { t1 = rb(); }
+  }
+  body[0] = t1;
+  body[1] = (uint8)rl;
+  rfill(&tmp[0], rl);
+  if (rn(3) == 0 && rl > 0) { tmp[0] = 0; }
+  cp(&body[2], &tmp[0], rl);
+  bp = 2 + rl;
+  body[bp] = t2;
+  body[bp + 1] = (uint8)sl;
+  rfill(&tmp[0], sl);
+  if (rn(3) == 0 && sl > 0) { tmp[0] = 0; }
+  cp(&body[bp + 2], &tmp[0], sl);
+  bp = bp + 2 + sl;
+  var n: int64 = 0;
+  if (v == 1 || v == 7) {
+    b[0] = 48;
+    b[1] = (uint8)bp;
+    n = 2;
+  }
+  if (v == 2) {
+    b[0] = 48;
+    b[1] = (uint8)(bp + rn(5) - 2);
+    n = 2;
+  }
+  if (v == 3) {
+    b[0] = 48;
+    b[1] = 129;
+    b[2] = (uint8)bp;
+    n = 3;
+    if (rn(2) == 0) {
+      b[1] = 130;
+      b[2] = 0;
+      b[3] = (uint8)bp;
+      n = 4;
+    }
+  }
+  if (v == 4) {
+    var big: uint8[6] = [132, 255, 255, 255, 255, 0];
+    var lens: uint8[8] = [255, 133, 136, 130, 132, 128, 127, 129];
+    b[0] = 48;
+    b[1] = lens[rn(8)];
+    n = 2;
+    var extra: int64 = rn(6);
+    var q: int64 = 0;
+    while (q < extra) {
+      b[n] = big[rn(5)];
+      n = n + 1;
+      q = q + 1;
+    }
+  }
+  if (v == 5) {
+    b[0] = 48;
+    b[1] = 128;
+    n = 2;
+  }
+  if (v == 6) {
+    b[0] = 48;
+    b[1] = (uint8)(bp + 2);
+    b[2] = 48;
+    b[3] = (uint8)bp;
+    n = 4;
+    if (rn(2) == 0) {
+      b[0] = 48;
+      b[1] = (uint8)(bp + 4);
+      b[2] = 48;
+      b[3] = (uint8)(bp + 2);
+      b[4] = 48;
+      b[5] = (uint8)bp;
+      n = 6;
+    }
+  }
+  cp(&b[n], &body[0], bp);
+  n = n + bp;
+  if (v == 5) {
+    b[n] = 0;
+    b[n + 1] = 0;
+    n = n + 2;
+  }
+  return n;
+}
+
+fn fuzz_ecdsa(curve: int64) {
+  var tried: int64 = 0;
+  var r: int64 = 0;
+  var sg: uint8[320];
+  var sg0: uint8[320];
+  var pt: uint8[260];
+  var mb: uint8[100];
+  var fxs: EcFx* = &g_fx256[0];
+  var nb: int64 = 32;
+  var order: uint8* = &g_n256[0];
+  if (curve == 384) {
+    fxs = &g_fx384[0];
+    nb = 48;
+    order = &g_n384[0];
+  }
+  while (r < FUZZ_ROUNDS) {
+    var f: EcFx* = &fxs[rn(4)];
+    var h: int64 = rn(3);
+    var sl: int64 = f->sl[h];
+    cp(&sg[0], &f->sig[h * 110], sl);
+    cp(&sg0[0], &sg[0], sl);
+    cp(&mb[0], &f->msg[0], f->ml);
+    var ml: int64 = f->ml;
+    var hash: int32 = (int32)(h + 1);
+    var pkl: int64 = f->pkl;
+    cp(&pt[0], &f->pk[0], pkl);
+    var expect: bool = false;
+    var sc: int64 = rn(10);
+    var inl: int64 = sl;
+    if (sc == 0) { expect = true; }
+    if (sc == 1 || sc == 2) {
+      mutate(&sg[0], &inl, 320);
+      expect = same(&sg[0], inl, &sg0[0], sl);
+    }
+    if (sc == 3) { inl = der_junk(&sg[0], nb, order); }
+    if (sc == 4) {
+      inl = rn(301);
+      rfill(&sg[0], inl);
+    }
+    if (sc == 5) {
+      pkl = pt_junk(&pt[0], curve, f);
+      expect = same(&pt[0], pkl, &f->pk[0], f->pkl);
+    }
+    if (sc == 6) {
+      mutate(&mb[0], &ml, 100);
+      expect = same(&mb[0], ml, &f->msg[0], f->ml);
+    }
+    if (sc == 7) {
+      var bad: int32[6] = [0, 4, -1, 100, 2147483647, 7];
+      if (rn(2) == 0) {
+        hash = bad[rn(6)];
+      } else {
+        hash = (int32)(1 + (h + 1 + rn(2)) % 3);
+      }
+      expect = hash == (int32)(h + 1);
+    }
+    if (sc == 8) {
+      var g: EcFx* = &fxs[rn(4)];
+      cp(&pt[0], &g->pk[0], pkl);
+      expect = same(&pt[0], pkl, &f->pk[0], f->pkl);
+    }
+    var sq: uint8* = dup(&sg[0], inl);
+    var mq: uint8* = dup(&mb[0], ml);
+    var pq: uint8* = dup(&pt[0], pkl);
+    var got: bool = false;
+    if (sc == 9) {
+      var w: int64 = rn(5);
+      if (w == 0) { got = ec_verify(curve, sq, -1 - rn(10), mq, ml, hash, pq, pkl); }
+      if (w == 1) { got = ec_verify(curve, sq, inl, mq, -1 - rn(10), hash, pq, pkl); }
+      if (w == 2) { got = ec_verify(curve, sq, inl, mq, ml, hash, pq, -1 - rn(10)); }
+      if (w == 3) { got = ec_verify(curve, 0, inl, mq, ml, hash, pq, pkl); }
+      if (w == 4) { got = ec_verify(curve, sq, inl, mq, ml, hash, 0, pkl); }
+    } else {
+      got = ec_verify(curve, sq, inl, mq, ml, hash, pq, pkl);
+    }
+    chk("ecdsa verdict", got == expect, sq, inl);
+    gfree(sq);
+    gfree(mq);
+    gfree(pq);
+    tried = tried + 1;
+    r = r + 1;
+  }
+  if (curve == 256) { report("p256_ecdsa", tried); } else { report("p384_ecdsa", tried); }
+}
+
+// ---- rsa ------------------------------------------------------------------------------
+
+struct RsaFx {
+  hash: int32;
+  n: uint8[520];
+  nl: int64;
+  e: uint8[16];
+  el: int64;
+  msg: uint8[256];
+  ml: int64;
+  sig: uint8[520];
+  sl: int64;
+}
+
+var g_rfx: RsaFx[2];
+
+fn rsa_hash_id(s: string) -> int32 {
+  if (s == "256") { return CR_HASH_SHA256; }
+  if (s == "384") { return CR_HASH_SHA384; }
+  return CR_HASH_SHA512;
+}
+
+fn rsa_load(f: RsaFx*, row: string) {
+  f->hash = rsa_hash_id(tc_field(row, 0));
+  f->nl = tc_unhex(tc_field(row, 1), &f->n[0], 520);
+  f->el = tc_unhex(tc_field(row, 2), &f->e[0], 16);
+  f->ml = tc_unhex(tc_field(row, 3), &f->msg[0], 256);
+  f->sl = tc_unhex(tc_field(row, 4), &f->sig[0], 520);
+}
+
+fn rsa_verify(pss: bool, sig: uint8*, sl: int64, msg: uint8*, n: int64, hash: int32, mod: uint8*, ml: int64, e: uint8*, el: int64) -> bool {
+  if (pss) { return cr_rsa_verify_pss(sig, sl, msg, n, hash, mod, ml, e, el); }
+  return cr_rsa_verify_pkcs1(sig, sl, msg, n, hash, mod, ml, e, el);
+}
+
+fn fuzz_rsa_real(pss: bool) {
+  var f: RsaFx* = &g_rfx[0];
+  if (pss) { f = &g_rfx[1]; }
+  var tried: int64 = 0;
+  var r: int64 = 0;
+  var sg: uint8[600];
+  var md: uint8[600];
+  var ex: uint8[20];
+  var mg: uint8[300];
+  while (r < FUZZ_ROUNDS) {
+    cp(&sg[0], &f->sig[0], f->sl);
+    cp(&md[0], &f->n[0], f->nl);
+    cp(&ex[0], &f->e[0], f->el);
+    cp(&mg[0], &f->msg[0], f->ml);
+    var sl: int64 = f->sl;
+    var nl: int64 = f->nl;
+    var el: int64 = f->el;
+    var ml: int64 = f->ml;
+    var hash: int32 = f->hash;
+    var expect: bool = false;
+    var sc: int64 = rn(10);
+    if (sc == 0) { expect = true; }
+    if (sc == 1 || sc == 2) {
+      mutate(&sg[0], &sl, 520);
+      expect = same(&sg[0], sl, &f->sig[0], f->sl);
+    }
+    if (sc == 3) {
+      sl = f->sl;
+      if (rn(3) == 0) { sl = rn(300); }
+      rfill(&sg[0], sl);
+    }
+    if (sc == 4) {
+      var m: int64 = rn(6);
+      sl = f->nl;
+      if (m == 0) { cp(&sg[0], &f->n[0], sl); }
+      if (m == 1) { tc_fill(&sg[0], sl, 0); }
+      if (m == 2) { tc_fill(&sg[0], sl, 0); sg[sl - 1] = 1; }
+      if (m == 3) { cp(&sg[0], &f->n[0], sl); sg[sl - 1] = (uint8)(sg[sl - 1] - 1); }
+      if (m == 4) { tc_fill(&sg[0], sl, 255); }
+      if (m == 5) { cp(&sg[0], &f->n[0], sl); sg[sl - 1] = (uint8)(sg[sl - 1] + 1 + rn(20)); }
+    }
+    if (sc == 5) {
+      mutate(&mg[0], &ml, 300);
+      expect = same(&mg[0], ml, &f->msg[0], f->ml);
+    }
+    if (sc == 6) {
+      var bad: int32[6] = [0, 4, -1, 100, 2147483647, 7];
+      if (rn(2) == 0) {
+        hash = bad[rn(6)];
+      } else {
+        hash = (int32)(1 + rn(3));
+      }
+      expect = hash == f->hash;
+    }
+    if (sc == 7) {
+      mutate(&md[0], &nl, 520);
+      expect = same(&md[0], nl, &f->n[0], f->nl);
+    }
+    if (sc == 8) {
+      mutate(&ex[0], &el, 20);
+      expect = same(&ex[0], el, &f->e[0], f->el);
+    }
+    var sq: uint8* = dup(&sg[0], sl);
+    var mq: uint8* = dup(&mg[0], ml);
+    var nq: uint8* = dup(&md[0], nl);
+    var eq: uint8* = dup(&ex[0], el);
+    var got: bool = false;
+    if (sc == 9) {
+      var w: int64 = rn(8);
+      if (w == 0) { got = rsa_verify(pss, 0, sl, mq, ml, hash, nq, nl, eq, el); }
+      if (w == 1) { got = rsa_verify(pss, sq, sl, 0, 1 + rn(5), hash, nq, nl, eq, el); }
+      if (w == 2) { got = rsa_verify(pss, sq, sl, mq, ml, hash, 0, nl, eq, el); }
+      if (w == 3) { got = rsa_verify(pss, sq, sl, mq, ml, hash, nq, nl, 0, el); }
+      if (w == 4) { got = rsa_verify(pss, sq, -1 - rn(5), mq, ml, hash, nq, nl, eq, el); }
+      if (w == 5) { got = rsa_verify(pss, sq, sl, mq, -1 - rn(5), hash, nq, nl, eq, el); }
+      if (w == 6) { got = rsa_verify(pss, sq, sl, mq, ml, hash, nq, -1 - rn(5), eq, el); }
+      if (w == 7) { got = rsa_verify(pss, sq, sl, mq, ml, hash, nq, nl, eq, -1 - rn(5)); }
+    } else {
+      got = rsa_verify(pss, sq, sl, mq, ml, hash, nq, nl, eq, el);
+    }
+    chk("rsa real key verdict", got == expect, sq, sl);
+    gfree(sq);
+    gfree(mq);
+    gfree(nq);
+    gfree(eq);
+    tried = tried + 1;
+    r = r + 1;
+  }
+  if (pss) { report("rsa_pss_real_key", tried); } else { report("rsa_pkcs1_real_key", tried); }
+}
+
+fn fuzz_rsa_random(pss: bool) {
+  var tried: int64 = 0;
+  var r: int64 = 0;
+  var md: uint8[700];
+  var sg: uint8[700];
+  var ex: uint8[20];
+  var mg: uint8[120];
+  while (r < RSA_ROUNDS) {
+    var nl: int64 = rn(601);
+    if (rn(4) != 0) { nl = 250 + rn(275); }
+    rfill(&md[0], nl);
+    var mode: int64 = rn(8);
+    if (nl > 0 && mode <= 3) { md[0] = (uint8)(md[0] | 128); }
+    if (nl > 0 && mode <= 5) { md[nl - 1] = (uint8)(md[nl - 1] | 1); }
+    if (nl > 0 && mode == 6) { tc_fill(&md[0], nl, 255); }
+    if (nl > 3 && mode == 7) {
+      md[0] = 0;
+      md[1] = 0;
+    }
+    var el: int64 = rn(13);
+    rfill(&ex[0], el);
+    if (el > 0 && rn(3) != 0) { ex[el - 1] = (uint8)(ex[el - 1] | 1); }
+    if (rn(4) == 0) {
+      el = 1 + rn(3);
+      var evals: uint8[4] = [3, 5, 17, 255];
+      ex[el - 1] = evals[rn(4)];
+      var z: int64 = 0;
+      while (z < el - 1) {
+        ex[z] = 0;
+        z = z + 1;
+      }
+    }
+    var sl: int64 = nl;
+    if (rn(4) == 0) { sl = rn(601); }
+    rfill(&sg[0], sl);
+    if (sl > 0 && rn(4) != 0) { sg[0] = (uint8)(sg[0] & 63); }
+    var ml: int64 = rn(100);
+    rfill(&mg[0], ml);
+    var hash: int32 = (int32)(1 + rn(3));
+    if (rn(8) == 0) { hash = (int32)rn(8) - 1; }
+    var sq: uint8* = dup(&sg[0], sl);
+    var mq: uint8* = dup(&mg[0], ml);
+    var nq: uint8* = dup(&md[0], nl);
+    var eq: uint8* = dup(&ex[0], el);
+    var got: bool = rsa_verify(pss, sq, sl, mq, ml, hash, nq, nl, eq, el);
+    chk("rsa random key verdict", !got, nq, nl);
+    gfree(sq);
+    gfree(mq);
+    gfree(nq);
+    gfree(eq);
+    tried = tried + 1;
+    r = r + 1;
+  }
+  if (pss) { report("rsa_pss_random_key", tried); } else { report("rsa_pkcs1_random_key", tried); }
+}
+
+// ---- kdf ------------------------------------------------------------------------------------
+
+fn hk(which: int64, out: uint8*, outlen: int64, salt: uint8*, sl: int64, ikm: uint8*, il: int64, info: uint8*, infl: int64) -> int32 {
+  if (which == 256) { return cr_hkdf_sha256(out, outlen, salt, sl, ikm, il, info, infl); }
+  return cr_hkdf_sha384(out, outlen, salt, sl, ikm, il, info, infl);
+}
+
+fn fuzz_kdf() {
+  var tried: int64 = 0;
+  var r: int64 = 0;
+  var src: uint8[100];
+  var prk: uint8[48];
+  while (r < FUZZ_ROUNDS) {
+    var which: int64 = 256;
+    if (r % 2 == 1) { which = 384; }
+    var maxout: int64 = 8160;
+    var hl: int64 = 32;
+    if (which == 384) {
+      maxout = 12240;
+      hl = 48;
+    }
+    var outlen: int64 = 1 + rn(300);
+    var om: int64 = rn(12);
+    if (om == 0) { outlen = 0; }
+    if (om == 1) { outlen = maxout; }
+    if (om == 2) { outlen = maxout + 1; }
+    if (om == 3) { outlen = -1 - rn(1000); }
+    if (om == 4) { outlen = 1099511627776; }
+    if (om == 5) { outlen = 9223372036854775807; }
+    if (om == 6) { outlen = maxout - rn(3); }
+    if (om == 7) { outlen = 255 * hl + rn(3) - 1; }
+    if (om == 8) { outlen = 1 + rn(maxout); }
+    var in_range: bool = outlen >= 1 && outlen <= maxout;
+    var sl: int64 = rn(80);
+    var il: int64 = rn(80);
+    var infl: int64 = rn(80);
+    rfill(&src[0], 100);
+    var salt: uint8* = dup(&src[0], sl);
+    rfill(&src[0], 100);
+    var ikm: uint8* = dup(&src[0], il);
+    rfill(&src[0], 100);
+    var info: uint8* = dup(&src[0], infl);
+    var arg_err: bool = false;
+    var am: int64 = rn(12);
+    var out_null: bool = false;
+    if (am == 0) { gfree(salt); salt = 0; sl = 1 + rn(50); arg_err = true; }
+    if (am == 1) { gfree(ikm); ikm = 0; il = 1 + rn(50); arg_err = true; }
+    if (am == 2) { gfree(info); info = 0; infl = 1 + rn(50); arg_err = true; }
+    if (am == 3) { sl = -1 - rn(50); arg_err = true; }
+    if (am == 4) { il = -1 - rn(50); arg_err = true; }
+    if (am == 5) { infl = -1 - rn(50); arg_err = true; }
+    if (am == 6) { gfree(salt); salt = 0; sl = 0; }
+    if (am == 7) { gfree(ikm); ikm = 0; il = 0; }
+    if (am == 8) { gfree(info); info = 0; infl = 0; }
+    if (am == 9) { out_null = true; arg_err = true; }
+    if (!in_range) { arg_err = true; }
+    var cap: int64 = 0;
+    if (in_range) { cap = outlen; }
+    can_set(cap);
+    var rc: int32 = 0;
+    if (out_null) {
+      rc = hk(which, 0, outlen, salt, sl, ikm, il, info, infl);
+    } else {
+      rc = hk(which, g_o, outlen, salt, sl, ikm, il, info, infl);
+    }
+    chk("hkdf status", can_ok(cap), &src[0], 8);
+    if (arg_err) {
+      chk("hkdf arg error", rc == CR_E_ARG, &src[0], 8);
+      if (in_range && !out_null) { chk("hkdf arg error wiped", out_zero(cap), &src[0], 8); }
+    } else {
+      chk("hkdf ok", rc == CR_OK, &src[0], 8);
+      var l2: int64 = 1 + rn(outlen);
+      var rc2: int32 = hk(which, &g_out2[0], l2, salt, sl, ikm, il, info, infl);
+      chk("hkdf prefix", rc2 == CR_OK && same(g_o, l2, &g_out2[0], l2), &src[0], 8);
+      if (outlen <= 1000) {
+        var rc3: int32 = 0;
+        var rc4: int32 = 0;
+        if (which == 256) {
+          rc3 = cr_hkdf_sha256_extract(&prk[0], salt, sl, ikm, il);
+          rc4 = cr_hkdf_sha256_expand(&g_ref[0], outlen, &prk[0], 32, info, infl);
+        } else {
+          rc3 = cr_hkdf_sha384_extract(&prk[0], salt, sl, ikm, il);
+          rc4 = cr_hkdf_sha384_expand(&g_ref[0], outlen, &prk[0], 48, info, infl);
+        }
+        chk("hkdf two step", rc3 == CR_OK && rc4 == CR_OK && same(g_o, outlen, &g_ref[0], outlen), &src[0], 8);
+      }
+    }
+    if (r % 4 == 0) {
+      var pl: int64 = rn(70);
+      var pq: uint8* = dup(&src[0], pl);
+      var el: int64 = 1 + rn(300);
+      can_set(el);
+      var rce: int32 = 0;
+      if (which == 256) { rce = cr_hkdf_sha256_expand(g_o, el, pq, pl, info, infl); } else { rce = cr_hkdf_sha384_expand(g_o, el, pq, pl, info, infl); }
+      var ok_args: bool = pl >= hl && infl >= 0 && !(info == 0 && infl > 0);
+      if (ok_args) {
+        chk("hkdf expand ok", rce == CR_OK && can_ok(el), &src[0], 8);
+      } else {
+        chk("hkdf expand refused", rce == CR_E_ARG && can_ok(el) && out_zero(el), &src[0], 8);
+      }
+      var rcx: int32 = 0;
+      if (which == 256) { rcx = cr_hkdf_sha256_extract(&prk[0], salt, sl, ikm, il); } else { rcx = cr_hkdf_sha384_extract(&prk[0], salt, sl, ikm, il); }
+      var ex_ok: bool = sl >= 0 && il >= 0 && !(salt == 0 && sl > 0) && !(ikm == 0 && il > 0);
+      chk("hkdf extract", (rcx == CR_OK) == ex_ok && (ex_ok || rcx == CR_E_ARG), &src[0], 8);
+      gfree(pq);
+    }
+    if (salt != 0) { gfree(salt); }
+    if (ikm != 0) { gfree(ikm); }
+    if (info != 0) { gfree(info); }
+    tried = tried + 1;
+    r = r + 1;
+  }
+  report("hkdf", tried);
+}
+
+fn main() -> int32 {
+  guard_init();
+  fuzz_encode();
+  fuzz_signed();
+  fuzz_signed_until();
+  fuzz_token();
+  fuzz_code();
+  fuzz_totp();
+  fuzz_totp_text();
+  fuzz_seal();
+  fuzz_pwhash();
+  fuzz_aead();
+  tc_unhex("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551", &g_n256[0], 32);
+  tc_unhex("ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973", &g_n384[0], 48);
+  fuzz_x25519();
+  fuzz_ed25519();
+  ec_make_fixtures(256);
+  ec_make_fixtures(384);
+  fuzz_ecdh(256);
+  fuzz_ecdsa(256);
+  fuzz_ecdh(384);
+  fuzz_ecdsa(384);
+  var ri: int64 = 0;
+  while (ri < 2) {
+    var rrow: string = VEC_CAVP_RSA_15[0];
+    if (ri == 1) {
+      var q: int32 = 0;
+      while (q < VEC_CAVP_RSA_PSS_N) {
+        var pr: string = VEC_CAVP_RSA_PSS[q];
+        if (tc_field(pr, 5) == "v" && tc_field(pr, 0) == "256" && tc_field(pr, 1).length == 512) { rrow = pr; q = VEC_CAVP_RSA_PSS_N; }
+        q = q + 1;
+      }
+    }
+    rsa_load(&g_rfx[ri], rrow);
+    ri = ri + 1;
+  }
+  tc_ok("rsa fixtures", g_rfx[0].nl == 256 && g_rfx[1].nl == 256 && g_rfx[0].sl == 256 && g_rfx[1].sl == 256);
+  tc_ok("rsa fixture pkcs1", cr_rsa_verify_pkcs1(&g_rfx[0].sig[0], g_rfx[0].sl, &g_rfx[0].msg[0], g_rfx[0].ml, g_rfx[0].hash, &g_rfx[0].n[0], g_rfx[0].nl, &g_rfx[0].e[0], g_rfx[0].el));
+  tc_ok("rsa fixture pss", cr_rsa_verify_pss(&g_rfx[1].sig[0], g_rfx[1].sl, &g_rfx[1].msg[0], g_rfx[1].ml, g_rfx[1].hash, &g_rfx[1].n[0], g_rfx[1].nl, &g_rfx[1].e[0], g_rfx[1].el));
+  fuzz_rsa_real(false);
+  fuzz_rsa_real(true);
+  fuzz_rsa_random(false);
+  fuzz_rsa_random(true);
+  fuzz_kdf();
+  return tc_finish("fuzz");
+}
