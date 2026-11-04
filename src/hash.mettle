@@ -1,5 +1,4 @@
-// Hashes: SHA-256, SHA-512 (crypto_hash_sha256/512) and BLAKE2b
-// (crypto_generichash). Backend: libsodium.
+// Hashes: SHA-256, SHA-512 (libsodium) and BLAKE2b (pure Mettle, blake2b.mettle).
 //
 // None of these is a password hash (use cr_pwhash_str) or a MAC (use
 // cr_hmac_* or keyed BLAKE2b).
@@ -7,26 +6,26 @@
 import "status";
 import "types";
 import "core";
+import "blake2b";
 
 extern fn crypto_hash_sha256(out: uint8*, inp: uint8*, inlen: uint64) -> int32 = "crypto_hash_sha256";
 extern fn crypto_hash_sha512(out: uint8*, inp: uint8*, inlen: uint64) -> int32 = "crypto_hash_sha512";
-extern fn crypto_generichash(out: uint8*, outlen: uint64, inp: uint8*, inlen: uint64, key: uint8*, keylen: uint64) -> int32 = "crypto_generichash";
 
-/// Smallest BLAKE2b output length cr_blake2b accepts (crypto_generichash_BYTES_MIN).
+/// Smallest BLAKE2b output length cr_blake2b accepts (a hash shorter than this is too weak to be useful).
 /// in: - 
 /// returns: 16
 /// owns: nothing
 /// thread: constant
 /// example: cr_blake2b(&o[0], CR_BLAKE2B_MIN, m, n, 0, 0);
 export const CR_BLAKE2B_MIN: int64 = 16;
-/// Largest BLAKE2b output and key length (crypto_generichash_BYTES_MAX / KEYBYTES_MAX).
+/// Largest BLAKE2b output and key length (the RFC 7693 maximum).
 /// in: -
 /// returns: 64
 /// owns: nothing
 /// thread: constant
 /// example: var o: uint8[64]; cr_blake2b(&o[0], CR_BLAKE2B_MAX, m, n, 0, 0);
 export const CR_BLAKE2B_MAX: int64 = 64;
-/// Smallest non-empty BLAKE2b key (crypto_generichash_KEYBYTES_MIN).
+/// Smallest non-empty BLAKE2b key (shorter keys are too weak to be useful).
 /// in: -
 /// returns: 16
 /// owns: nothing
@@ -71,16 +70,16 @@ export fn cr_sha512(out: CrSha512*, msg: uint8*, n: int64) -> int32 {
   return CR_OK;
 }
 
-/// Computes BLAKE2b (RFC 7693; libsodium crypto_generichash), optionally
+/// Computes BLAKE2b (RFC 7693), optionally
 /// keyed (then it is a MAC/PRF), with a chosen output length.
 /// in: out writable for outlen bytes, outlen in [16, 64];
 ///   msg readable for n bytes (0 allowed when n == 0), n >= 0;
 ///   key readable for keylen bytes, keylen 0 (unkeyed; key may be 0) or in
 ///   [16, 64]
 /// returns: CR_OK; CR_E_ARG for any length outside those ranges or a null
-///   pointer with a non-zero length; CR_E_INIT. On error out is not written
+///   pointer with a non-zero length. On error out is not written
 /// owns: nothing; the caller owns out, msg and key (wipe the key yourself)
-/// thread: main thread only
+/// thread: any thread (no shared state)
 /// example: var d: uint8[32]; cr_blake2b(&d[0], 32, s.chars, (int64)s.length, 0, 0);
 export fn cr_blake2b(out: uint8*, outlen: int64, msg: uint8*, n: int64, key: uint8*, keylen: int64) -> int32 {
   if (out == 0 || outlen < CR_BLAKE2B_MIN || outlen > CR_BLAKE2B_MAX) { return CR_E_ARG; }
@@ -88,11 +87,11 @@ export fn cr_blake2b(out: uint8*, outlen: int64, msg: uint8*, n: int64, key: uin
   if (keylen != 0) {
     if (key == 0 || keylen < CR_BLAKE2B_KEY_MIN || keylen > CR_BLAKE2B_MAX) { return CR_E_ARG; }
   }
-  if (cr_init() != CR_OK) { return CR_E_INIT; }
+  var s: CrxBlake2b;
   var kp: uint8* = 0;
   if (keylen > 0) { kp = key; }
-  if (crypto_generichash(out, (uint64)outlen, cr_hash_in(msg, n), (uint64)n, kp, (uint64)keylen) != 0) {
-    return CR_E_INTERNAL;
-  }
+  crx_blake2b_init(&s, outlen, kp, keylen);
+  crx_blake2b_update(&s, msg, n);
+  crx_blake2b_final(&s, out);
   return CR_OK;
 }

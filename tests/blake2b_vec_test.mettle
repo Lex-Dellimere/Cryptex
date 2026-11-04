@@ -1,0 +1,57 @@
+// BLAKE2b against libsodium-generated vectors (tests/vec_blake2b.mettle:
+// msg|key|outlen hex|expected; tests/vec_hash.mettle field 3 = unkeyed
+// BLAKE2b-512), through cr_blake2b and through the streaming crx_ core
+// fed in three uneven parts.
+import "std/mem";
+import "crypto/crypto";
+import "crypto/blake2b";
+import "tcheck";
+import "vec_blake2b";
+import "vec_hash";
+
+fn stream3(out: uint8*, outlen: int64, msg: uint8*, n: int64, key: uint8*, keylen: int64) {
+  var s: CrxBlake2b;
+  crx_blake2b_init(&s, outlen, key, keylen);
+  var a: int64 = n / 3 + 1;
+  if (a > n) { a = n; }
+  var b: int64 = (n - a) / 2 + 1;
+  if (b > n - a) { b = n - a; }
+  crx_blake2b_update(&s, msg, a);
+  crx_blake2b_update(&s, &msg[a], b);
+  crx_blake2b_update(&s, &msg[a + b], n - a - b);
+  crx_blake2b_final(&s, out);
+  tc_ok("state wiped", s.buflen == 0 && s.outlen == 0 && tc_all_zero(&s.buf[0], 128));
+}
+
+fn check_row(label: string, mh: string, kh: string, outlen: int64, want: string) {
+  var msg: uint8[3000];
+  var key: uint8[64];
+  var out: uint8[64];
+  var n: int64 = tc_unhex(mh, &msg[0], 3000);
+  var kn: int64 = tc_unhex(kh, &key[0], 64);
+  tc_ok(label + " parse", n >= 0 && kn >= 0);
+  var kp: uint8* = 0;
+  if (kn > 0) { kp = &key[0]; }
+  if (outlen >= CR_BLAKE2B_MIN) {
+    tc_fill(&out[0], 64, 0);
+    tc_rc(label + " rc", cr_blake2b(&out[0], outlen, &msg[0], n, kp, kn), CR_OK);
+    tc_hex_eq(label, &out[0], outlen, want);
+  }
+  tc_fill(&out[0], 64, 0);
+  stream3(&out[0], outlen, &msg[0], n, kp, kn);
+  tc_hex_eq(label + " stream", &out[0], outlen, want);
+}
+
+fn main() -> int32 {
+  for i in 0..VEC_BLAKE2B_N {
+    var row: string = VEC_BLAKE2B[i];
+    var ol: uint8[1];
+    tc_unhex(tc_field(row, 2), &ol[0], 1);
+    check_row("blake2b row {i}", tc_field(row, 0), tc_field(row, 1), (int64)ol[0], tc_field(row, 3));
+  }
+  for i in 0..VEC_HASH_N {
+    var row: string = VEC_HASH[i];
+    check_row("hash row {i} blake2b-512", tc_field(row, 0), "", 64, tc_field(row, 3));
+  }
+  return tc_finish("blake2b_vec");
+}
