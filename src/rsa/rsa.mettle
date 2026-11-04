@@ -1,0 +1,312 @@
+// RSA signature verification in pure Mettle: RSASSA-PKCS1-v1_5 (RFC 8017
+// sections 8.2.2 and 9.2) and RSASSA-PSS (sections 8.1.2 and 9.1.2, with MGF1
+// from appendix B.2.1), over the 31-bit big integers of crypto/ecc/i31.
+//
+// Ported from BearSSL (rsa_i31_pub.c, rsa_pkcs1_sig_unpad.c,
+// rsa_pss_sig_unpad.c, mgf1.c), Copyright (c) 2016 Thomas Pornin, MIT
+// license; see NOTICE.
+//
+// Verification uses public data only (the key, the message and the
+// signature), so nothing here is constant time or wiped. The modulus and the
+// public exponent are big-endian bytes and may carry leading zero bytes. A
+// modulus is accepted from 2048 to 4096 bits, and must be odd; the exponent
+// must be odd, at least 3 and at most 8 bytes long. The signature must be
+// exactly as long as the modulus and lower than it. PKCS#1 v1.5 needs the
+// DigestInfo with the NULL parameters, byte for byte; PSS uses a salt as long
+// as the hash, MGF1 with the same hash and the 0xbc trailer. SHA-256, SHA-384
+// and SHA-512 are the hashes (CR_HASH_SHA256, CR_HASH_SHA384, CR_HASH_SHA512).
+
+import "crypto/core/util";
+import "crypto/hash/hash";
+import "crypto/ecc/i31";
+
+const CRX_RSA_MIN_BITS: int64 = 2048;
+const CRX_RSA_MAX_BITS: int64 = 4096;
+const CRX_RSA_MAX_BYTES: int64 = 512;
+const CRX_RSA_WORDS: int64 = 136;
+const CRX_RSA_TLEN: int64 = 1080;
+
+var g_crx_rsa_oid_sha256: uint8[10] = [
+  0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01
+];
+
+var g_crx_rsa_oid_sha384: uint8[10] = [
+  0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02
+];
+
+var g_crx_rsa_oid_sha512: uint8[10] = [
+  0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03
+];
+
+fn crx_rsa_oid(hash: int32) -> uint8* {
+  if (hash == CR_HASH_SHA256) { return &g_crx_rsa_oid_sha256[0]; }
+  if (hash == CR_HASH_SHA384) { return &g_crx_rsa_oid_sha384[0]; }
+  if (hash == CR_HASH_SHA512) { return &g_crx_rsa_oid_sha512[0]; }
+  return 0;
+}
+
+fn crx_rsa_leading_zeros(p: uint8*, n: int64) -> int64 {
+  var z: int64 = 0;
+  while (z < n && p[z] == 0) {
+    z = z + 1;
+  }
+  return z;
+}
+
+fn crx_rsa_bit_len(n: uint8*, nlen: int64) -> int64 {
+  return (nlen - 1) * 8 + (int64)crx_ct_bit_length32((uint32)n[0]);
+}
+
+fn crx_rsa_key_ok(n: uint8*, nlen: int64, e: uint8*, elen: int64) -> bool {
+  if (nlen < 1 || nlen > CRX_RSA_MAX_BYTES) { return false; }
+  var bits: int64 = crx_rsa_bit_len(n, nlen);
+  if (bits < CRX_RSA_MIN_BITS || bits > CRX_RSA_MAX_BITS) { return false; }
+  if ((n[nlen - 1] & 1) == 0) { return false; }
+  if (elen < 1 || elen > 8) { return false; }
+  if ((e[elen - 1] & 1) == 0) { return false; }
+  if (elen == 1 && e[0] < 3) { return false; }
+  return true;
+}
+
+/// internal: RSA public operation. x (xlen bytes, big-endian) is replaced by
+/// x ^ e mod n. n (nlen bytes) and e (elen bytes) have no leading zero byte
+/// and passed crx_rsa_key_ok. Returns false, leaving x unspecified, if xlen
+/// differs from nlen or x is not lower than n.
+export fn crx_rsa_public(x: uint8*, xlen: int64, n: uint8*, nlen: int64, e: uint8*, elen: int64) -> bool {
+  if (nlen < 1 || nlen > CRX_RSA_MAX_BYTES || xlen != nlen) { return false; }
+  var m: uint32[136];
+  var a: uint32[136];
+  var tmp: uint32[1080];
+  crx_i31_decode(&m[0], n, nlen);
+  var m0i: uint32 = crx_i31_ninv31(m[1]);
+  var r: uint32 = m0i & 1;
+  r = r & crx_i31_decode_mod(&a[0], x, xlen, &m[0]);
+  r = r & crx_i31_modpow_opt(&a[0], e, elen, &m[0], m0i, &tmp[0], CRX_RSA_TLEN);
+  crx_i31_encode(x, xlen, &a[0]);
+  return r == 1;
+}
+
+/// internal: MGF1 (RFC 8017 B.2.1) with the CR_HASH_* id: XORs len mask
+/// bytes generated from the seed (seed_len <= 64 bytes) into data. Returns
+/// false for an unknown hash or a seed longer than 64 bytes.
+export fn crx_mgf1_xor(data: uint8*, len: int64, hash: int32, seed: uint8*, seed_len: int64) -> bool {
+  var hlen: int64 = crx_hash_len(hash);
+  if (hlen == 0 || seed_len < 0 || seed_len > 64) { return false; }
+  var buf: uint8[68];
+  var tmp: uint8[64];
+  var i: int64 = 0;
+  while (i < seed_len) {
+    buf[i] = seed[i];
+    i = i + 1;
+  }
+  var u: int64 = 0;
+  var c: uint32 = 0;
+  while (u < len) {
+    buf[seed_len] = (uint8)(c >> 24);
+    buf[seed_len + 1] = (uint8)(c >> 16);
+    buf[seed_len + 2] = (uint8)(c >> 8);
+    buf[seed_len + 3] = (uint8)c;
+    if (crx_hash_msg(&tmp[0], hash, &buf[0], seed_len + 4) != hlen) { return false; }
+    var v: int64 = 0;
+    while (v < hlen) {
+      if (u + v >= len) { break; }
+      data[u + v] = data[u + v] ^ tmp[v];
+      v = v + 1;
+    }
+    u = u + hlen;
+    c = c + 1;
+  }
+  return true;
+}
+
+// The PKCS#1 v1.5 check of BearSSL (rsa_pkcs1_sig_unpad.c), for a signature
+// of the form
+//   00 01 FF ... FF 00 30 x1 30 x2 06 x3 OID 05 00 04 x4 HASH
+// with at least eight FF bytes; the NULL parameters are required. The hash
+// value is compared with the one given.
+fn crx_rsa_pkcs1_unpad(sig: uint8*, sig_len: int64, oid: uint8*, hash_len: int64, hash: uint8*) -> bool {
+  if (sig_len < 11) { return false; }
+  if (sig[0] != 0 || sig[1] != 1) { return false; }
+  var u: int64 = 2;
+  while (u < 10) {
+    if (sig[u] != 0xFF) { return false; }
+    u = u + 1;
+  }
+  while (u < sig_len) {
+    if (sig[u] != 0xFF) { break; }
+    u = u + 1;
+  }
+  var pad2: uint8[32];
+  var x3: int64 = (int64)oid[0];
+  var pad_len: int64 = x3 + 9;
+  var zlen: int64 = sig_len - u - hash_len;
+  if (zlen != pad_len + 2) { return false; }
+  var x2: int64 = x3 + 4;
+  pad_len = zlen;
+  var i: int64 = 0;
+  while (i < pad_len) {
+    pad2[i] = 0;
+    i = i + 1;
+  }
+  pad2[pad_len - 4] = 0x05;
+  pad2[1] = 0x30;
+  pad2[2] = (uint8)(x2 + hash_len + 4);
+  pad2[3] = 0x30;
+  pad2[4] = (uint8)x2;
+  pad2[5] = 0x06;
+  i = 0;
+  while (i <= x3) {
+    pad2[6 + i] = oid[i];
+    i = i + 1;
+  }
+  pad2[pad_len - 2] = 0x04;
+  pad2[pad_len - 1] = (uint8)hash_len;
+  if (!cr_equal(&pad2[0], &sig[u], pad_len)) { return false; }
+  return cr_equal(&sig[sig_len - hash_len], hash, hash_len);
+}
+
+// The PSS check of BearSSL (rsa_pss_sig_unpad.c) on the decoded signature x
+// (as long as the modulus n, which has no leading zero byte), for the hash of
+// the message mhash. x is modified.
+fn crx_rsa_pss_unpad(hash: int32, mhash: uint8*, salt_len: int64, n: uint8*, nlen: int64, x_in: uint8*) -> bool {
+  var hash_len: int64 = crx_hash_len(hash);
+  if (hash_len == 0) { return false; }
+  var x: uint8* = x_in;
+  var r: uint32 = 0;
+  var n_bitlen: int64 = crx_rsa_bit_len(n, nlen) - 1;
+  var sh: int32 = (int32)(n_bitlen & 7);
+  if (sh == 0) {
+    r = r | (uint32)x[0];
+    x = &x[1];
+  } else {
+    r = r | ((uint32)x[0] & ((uint32)0xFF << sh));
+  }
+  var xlen: int64 = (n_bitlen + 7) >> 3;
+  if (hash_len > xlen || salt_len > xlen || (hash_len + salt_len + 2) > xlen) {
+    return false;
+  }
+  r = r | ((uint32)x[xlen - 1] ^ 0xBC);
+
+  var seed: uint8* = &x[xlen - hash_len - 1];
+  if (!crx_mgf1_xor(x, xlen - hash_len - 1, hash, seed, hash_len)) { return false; }
+  if (sh != 0) {
+    x[0] = x[0] & (uint8)(0xFF >> (8 - sh));
+  }
+
+  var u: int64 = 0;
+  while (u < xlen - hash_len - salt_len - 2) {
+    r = r | (uint32)x[u];
+    u = u + 1;
+  }
+  r = r | ((uint32)x[xlen - hash_len - salt_len - 2] ^ 1);
+
+  var buf: uint8[136];
+  var tmp: uint8[64];
+  var i: int64 = 0;
+  while (i < 8) {
+    buf[i] = 0;
+    i = i + 1;
+  }
+  i = 0;
+  while (i < hash_len) {
+    buf[8 + i] = mhash[i];
+    i = i + 1;
+  }
+  var salt: uint8* = &x[xlen - hash_len - salt_len - 1];
+  i = 0;
+  while (i < salt_len) {
+    buf[8 + hash_len + i] = salt[i];
+    i = i + 1;
+  }
+  if (crx_hash_msg(&tmp[0], hash, &buf[0], 8 + hash_len + salt_len) != hash_len) { return false; }
+
+  u = 0;
+  while (u < hash_len) {
+    r = r | ((uint32)tmp[u] ^ (uint32)x[(xlen - hash_len - 1) + u]);
+    u = u + 1;
+  }
+  return r == 0;
+}
+
+/// Verifies an RSASSA-PKCS1-v1_5 signature (RFC 8017 8.2.2) over a message.
+/// The message is hashed with the CR_HASH_* choice and the signature must
+/// equal the encoding 00 01 FF..FF 00 DigestInfo(hash, NULL parameters) H
+/// exactly. The modulus must have 2048 to 4096 bits and be odd; the public
+/// exponent must be odd, at least 3 and at most 8 bytes; both are big-endian
+/// and may carry leading zero bytes. The signature must be exactly as long as
+/// the modulus and lower than it.
+/// in: sig readable for sig_len bytes; msg readable for n bytes (may be 0
+///   when n == 0); hash is CR_HASH_SHA256, CR_HASH_SHA384 or CR_HASH_SHA512;
+///   mod readable for mod_len bytes; e readable for e_len bytes
+/// returns: true only for a valid signature; false for an invalid one and for
+///   any bad argument (null pointer, negative length, unknown hash, bad key,
+///   wrong signature length)
+/// owns: nothing; all inputs stay with the caller
+/// thread: any thread (no shared state)
+/// example: if (cr_rsa_verify_pkcs1(sig, sl, m, n, CR_HASH_SHA256, mod, ml, e, el)) { accept(); }
+export fn cr_rsa_verify_pkcs1(sig: uint8*, sig_len: int64, msg: uint8*, n: int64, hash: int32, mod: uint8*, mod_len: int64, e: uint8*, e_len: int64) -> bool {
+  if (sig == 0 || mod == 0 || e == 0 || sig_len < 0 || mod_len < 0 || e_len < 0) { return false; }
+  if (n < 0 || (msg == 0 && n > 0)) { return false; }
+  var oid: uint8* = crx_rsa_oid(hash);
+  var hlen: int64 = crx_hash_len(hash);
+  if (oid == 0 || hlen == 0) { return false; }
+  var mz: int64 = crx_rsa_leading_zeros(mod, mod_len);
+  var ez: int64 = crx_rsa_leading_zeros(e, e_len);
+  var np: uint8* = &mod[mz];
+  var nlen: int64 = mod_len - mz;
+  var ep: uint8* = &e[ez];
+  var elen: int64 = e_len - ez;
+  if (!crx_rsa_key_ok(np, nlen, ep, elen)) { return false; }
+  if (sig_len != nlen) { return false; }
+  var h: uint8[64];
+  if (crx_hash_msg(&h[0], hash, msg, n) != hlen) { return false; }
+  var x: uint8[512];
+  var i: int64 = 0;
+  while (i < sig_len) {
+    x[i] = sig[i];
+    i = i + 1;
+  }
+  if (!crx_rsa_public(&x[0], sig_len, np, nlen, ep, elen)) { return false; }
+  return crx_rsa_pkcs1_unpad(&x[0], sig_len, oid, hlen, &h[0]);
+}
+
+/// Verifies an RSASSA-PSS signature (RFC 8017 8.1.2) over a message. The
+/// message is hashed with the CR_HASH_* choice; MGF1 uses the same hash, the
+/// salt is as long as the hash and the trailer is 0xbc (RFC 8017 9.1.2). The
+/// modulus must have 2048 to 4096 bits and be odd; the public exponent must
+/// be odd, at least 3 and at most 8 bytes; both are big-endian and may carry
+/// leading zero bytes. The signature must be exactly as long as the modulus
+/// and lower than it.
+/// in: sig readable for sig_len bytes; msg readable for n bytes (may be 0
+///   when n == 0); hash is CR_HASH_SHA256, CR_HASH_SHA384 or CR_HASH_SHA512;
+///   mod readable for mod_len bytes; e readable for e_len bytes
+/// returns: true only for a valid signature; false for an invalid one and for
+///   any bad argument (null pointer, negative length, unknown hash, bad key,
+///   wrong signature length)
+/// owns: nothing; all inputs stay with the caller
+/// thread: any thread (no shared state)
+/// example: if (cr_rsa_verify_pss(sig, sl, m, n, CR_HASH_SHA256, mod, ml, e, el)) { accept(); }
+export fn cr_rsa_verify_pss(sig: uint8*, sig_len: int64, msg: uint8*, n: int64, hash: int32, mod: uint8*, mod_len: int64, e: uint8*, e_len: int64) -> bool {
+  if (sig == 0 || mod == 0 || e == 0 || sig_len < 0 || mod_len < 0 || e_len < 0) { return false; }
+  if (n < 0 || (msg == 0 && n > 0)) { return false; }
+  var hlen: int64 = crx_hash_len(hash);
+  if (hlen == 0) { return false; }
+  var mz: int64 = crx_rsa_leading_zeros(mod, mod_len);
+  var ez: int64 = crx_rsa_leading_zeros(e, e_len);
+  var np: uint8* = &mod[mz];
+  var nlen: int64 = mod_len - mz;
+  var ep: uint8* = &e[ez];
+  var elen: int64 = e_len - ez;
+  if (!crx_rsa_key_ok(np, nlen, ep, elen)) { return false; }
+  if (sig_len != nlen) { return false; }
+  var h: uint8[64];
+  if (crx_hash_msg(&h[0], hash, msg, n) != hlen) { return false; }
+  var x: uint8[512];
+  var i: int64 = 0;
+  while (i < sig_len) {
+    x[i] = sig[i];
+    i = i + 1;
+  }
+  if (!crx_rsa_public(&x[0], sig_len, np, nlen, ep, elen)) { return false; }
+  return crx_rsa_pss_unpad(hash, &h[0], hlen, np, nlen, &x[0]);
+}

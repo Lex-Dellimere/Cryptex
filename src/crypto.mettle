@@ -24,6 +24,7 @@
 //              P-256, FIPS 186-5); curve25519 and i31 (big integers) are
 //              internal
 //   password/  pwhash: cr_pwhash_* (Argon2id, RFC 9106); argon2 is internal
+//   rsa/       cr_rsa_verify_pkcs1, cr_rsa_verify_pss (RFC 8017)
 //   recipes/   signed (signed values), token (tokens and recovery codes),
 //              seal (cr_seal, cr_open), totp (2FA codes, RFC 4226 and 6238)
 //
@@ -41,6 +42,7 @@ import "crypto/cipher/gcm";
 import "crypto/ecc/kx";
 import "crypto/ecc/sign";
 import "crypto/ecc/p256";
+import "crypto/rsa/rsa";
 import "crypto/core/encode";
 import "crypto/recipes/signed";
 import "crypto/recipes/token";

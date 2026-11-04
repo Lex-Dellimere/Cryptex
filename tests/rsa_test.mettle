@@ -1,0 +1,304 @@
+// RSA signature verification (RFC 8017): RSASSA-PKCS1-v1_5 and RSASSA-PSS.
+// NIST CAVP SigVer15 and SigVerPSS rows (tests/vectors/vec_cavp_rsa_15,
+// vec_cavp_rsa_pss; 2048 and 3072 bit keys) and Wycheproof rows
+// (tests/vectors/vec_wp_rsa_pkcs1_*, vec_wp_rsa_pss_*; 2048, 3072 and 4096
+// bit keys). The verdict must be true exactly for the "v" rows.
+//
+// Row format, hex fields joined by '|':
+//   hash (256, 384 or 512) | n | e | message | signature | v-or-i
+//
+// Besides the rows: a derived 1024 bit key, a signature one byte short, bad
+// hash ids, leading zero bytes in the key, even keys, bad exponents, null
+// arguments, and the release time of one verification at 2048 and 4096 bits.
+import "crypto/rsa/rsa";
+import "crypto/hash/hash";
+import "tcheck";
+import "std/bench";
+import "vectors/vec_cavp_rsa_15";
+import "vectors/vec_cavp_rsa_pss";
+import "vectors/vec_wp_rsa_pkcs1_2048_sha256";
+import "vectors/vec_wp_rsa_pkcs1_3072_sha384";
+import "vectors/vec_wp_rsa_pkcs1_4096_sha512";
+import "vectors/vec_wp_rsa_pss_2048_sha256_32";
+import "vectors/vec_wp_rsa_pss_2048_sha384_48";
+import "vectors/vec_wp_rsa_pss_3072_sha256_32";
+import "vectors/vec_wp_rsa_pss_4096_sha512_64";
+
+struct RsaCase {
+  hash: int32;
+  n: uint8[520];
+  nl: int64;
+  e: uint8[16];
+  el: int64;
+  msg: uint8[256];
+  ml: int64;
+  sig: uint8[520];
+  sl: int64;
+  ok: bool;
+}
+
+var g_rows_v: int32 = 0;
+var g_rows_i: int32 = 0;
+var g_first_pkcs1_2048: string = "";
+var g_first_pkcs1_4096: string = "";
+var g_first_pss_2048: string = "";
+var g_first_pss_4096: string = "";
+
+fn hash_id(s: string) -> int32 {
+  if (s == "256") { return CR_HASH_SHA256; }
+  if (s == "384") { return CR_HASH_SHA384; }
+  if (s == "512") { return CR_HASH_SHA512; }
+  return 0;
+}
+
+fn load(c: RsaCase*, row: string) -> bool {
+  c->hash = hash_id(tc_field(row, 0));
+  c->nl = tc_unhex(tc_field(row, 1), &c->n[0], 520);
+  c->el = tc_unhex(tc_field(row, 2), &c->e[0], 16);
+  c->ml = tc_unhex(tc_field(row, 3), &c->msg[0], 256);
+  c->sl = tc_unhex(tc_field(row, 4), &c->sig[0], 520);
+  c->ok = tc_field(row, 5) == "v";
+  return c->hash != 0 && c->nl > 0 && c->el >= 0 && c->ml >= 0 && c->sl >= 0;
+}
+
+fn verify(c: RsaCase*, pss: bool) -> bool {
+  if (pss) {
+    return cr_rsa_verify_pss(&c->sig[0], c->sl, &c->msg[0], c->ml, c->hash, &c->n[0], c->nl, &c->e[0], c->el);
+  }
+  return cr_rsa_verify_pkcs1(&c->sig[0], c->sl, &c->msg[0], c->ml, c->hash, &c->n[0], c->nl, &c->e[0], c->el);
+}
+
+fn check_row(label: string, row: string, pss: bool) -> string {
+  var c: RsaCase;
+  tc_ok(label + " fields", load(&c, row));
+  tc_ok(label + " verdict", verify(&c, pss) == c.ok);
+  if (c.ok) {
+    g_rows_v = g_rows_v + 1;
+    return row;
+  }
+  g_rows_i = g_rows_i + 1;
+  return "";
+}
+
+fn rows_cavp_15() {
+  for r in 0..VEC_CAVP_RSA_15_N {
+    check_row("cavp pkcs1 row {r}", VEC_CAVP_RSA_15[r], false);
+  }
+}
+
+fn rows_cavp_pss() {
+  for r in 0..VEC_CAVP_RSA_PSS_N {
+    check_row("cavp pss row {r}", VEC_CAVP_RSA_PSS[r], true);
+  }
+}
+
+fn rows_wp_pkcs1() {
+  for r in 0..VEC_WP_RSA_PKCS1_2048_SHA256_N {
+    var f: string = check_row("wp pkcs1 2048 sha256 row {r}", VEC_WP_RSA_PKCS1_2048_SHA256[r], false);
+    if (g_first_pkcs1_2048.length == 0) { g_first_pkcs1_2048 = f; }
+  }
+  for r in 0..VEC_WP_RSA_PKCS1_3072_SHA384_N {
+    check_row("wp pkcs1 3072 sha384 row {r}", VEC_WP_RSA_PKCS1_3072_SHA384[r], false);
+  }
+  for r in 0..VEC_WP_RSA_PKCS1_4096_SHA512_N {
+    var f: string = check_row("wp pkcs1 4096 sha512 row {r}", VEC_WP_RSA_PKCS1_4096_SHA512[r], false);
+    if (g_first_pkcs1_4096.length == 0) { g_first_pkcs1_4096 = f; }
+  }
+}
+
+fn rows_wp_pss() {
+  for r in 0..VEC_WP_RSA_PSS_2048_SHA256_32_N {
+    var f: string = check_row("wp pss 2048 sha256 row {r}", VEC_WP_RSA_PSS_2048_SHA256_32[r], true);
+    if (g_first_pss_2048.length == 0) { g_first_pss_2048 = f; }
+  }
+  for r in 0..VEC_WP_RSA_PSS_2048_SHA384_48_N {
+    check_row("wp pss 2048 sha384 row {r}", VEC_WP_RSA_PSS_2048_SHA384_48[r], true);
+  }
+  for r in 0..VEC_WP_RSA_PSS_3072_SHA256_32_N {
+    check_row("wp pss 3072 sha256 row {r}", VEC_WP_RSA_PSS_3072_SHA256_32[r], true);
+  }
+  for r in 0..VEC_WP_RSA_PSS_4096_SHA512_64_N {
+    var f: string = check_row("wp pss 4096 sha512 row {r}", VEC_WP_RSA_PSS_4096_SHA512_64[r], true);
+    if (g_first_pss_4096.length == 0) { g_first_pss_4096 = f; }
+  }
+}
+
+// Argument and key edge cases, built from one valid row (so a "true" is
+// always the verdict of the vector itself).
+fn edges(label: string, row: string, pss: bool) {
+  var c: RsaCase;
+  tc_ok(label + " fields", load(&c, row) && c.ok);
+  tc_ok(label + " base case", verify(&c, pss));
+  var hid: int32 = c.hash;
+
+  c.hash = 0;
+  tc_ok(label + " hash id 0", !verify(&c, pss));
+  c.hash = 4;
+  tc_ok(label + " hash id 4", !verify(&c, pss));
+  c.hash = -1;
+  tc_ok(label + " hash id -1", !verify(&c, pss));
+  c.hash = hid % 3 + 1;
+  tc_ok(label + " other hash", !verify(&c, pss));
+  c.hash = hid;
+
+  c.sl = c.sl - 1;
+  tc_ok(label + " signature one byte short", !verify(&c, pss));
+  c.sl = c.sl + 1;
+  tc_ok(label + " restored", verify(&c, pss));
+
+  c.sl = 0;
+  tc_ok(label + " empty signature", !verify(&c, pss));
+  c.sl = c.nl;
+
+  // A signature of one more byte: a zero byte in front.
+  var longer: RsaCase = c;
+  var i: int64 = c.sl;
+  while (i > 0) {
+    longer.sig[i] = c.sig[i - 1];
+    i = i - 1;
+  }
+  longer.sig[0] = 0;
+  longer.sl = c.sl + 1;
+  tc_ok(label + " signature one byte long", !verify(&longer, pss));
+
+  // The signature equal to the modulus is not lower than it.
+  var big: RsaCase = c;
+  i = 0;
+  while (i < c.nl) {
+    big.sig[i] = c.n[i];
+    i = i + 1;
+  }
+  tc_ok(label + " signature equal to the modulus", !verify(&big, pss));
+
+  // Leading zero bytes on the key are ignored.
+  var z: RsaCase = c;
+  i = c.nl;
+  while (i > 0) {
+    z.n[i + 2] = c.n[i - 1];
+    i = i - 1;
+  }
+  z.n[0] = 0;
+  z.n[1] = 0;
+  z.n[2] = 0;
+  z.nl = c.nl + 3;
+  i = c.el;
+  while (i > 0) {
+    z.e[i + 1] = c.e[i - 1];
+    i = i - 1;
+  }
+  z.e[0] = 0;
+  z.e[1] = 0;
+  z.el = c.el + 2;
+  tc_ok(label + " key with leading zero bytes", verify(&z, pss));
+
+  // An even modulus.
+  var ev: RsaCase = c;
+  ev.n[c.nl - 1] = c.n[c.nl - 1] ^ 1;
+  tc_ok(label + " even modulus", !verify(&ev, pss));
+
+  // Exponents: 0, 1, 2 and an even one are refused; a long one too.
+  var ex: RsaCase = c;
+  ex.el = 0;
+  tc_ok(label + " empty exponent", !verify(&ex, pss));
+  ex.e[0] = 0;
+  ex.el = 1;
+  tc_ok(label + " exponent 0", !verify(&ex, pss));
+  ex.e[0] = 1;
+  tc_ok(label + " exponent 1", !verify(&ex, pss));
+  ex.e[0] = 2;
+  tc_ok(label + " exponent 2", !verify(&ex, pss));
+  ex.e[0] = 4;
+  tc_ok(label + " exponent 4", !verify(&ex, pss));
+  ex.el = 9;
+  ex.e[0] = 1;
+  i = 1;
+  while (i < 8) {
+    ex.e[i] = 0;
+    i = i + 1;
+  }
+  ex.e[8] = 3;
+  tc_ok(label + " exponent of 9 bytes", !verify(&ex, pss));
+
+  // A 1024 bit key (the low 128 bytes of the modulus, top bit and low bit
+  // set) is refused whatever the signature.
+  var k: RsaCase = c;
+  i = 0;
+  while (i < 128) {
+    k.n[i] = c.n[c.nl - 128 + i];
+    k.sig[i] = c.sig[c.nl - 128 + i];
+    i = i + 1;
+  }
+  k.n[0] = k.n[0] | 0x80;
+  k.n[127] = k.n[127] | 1;
+  k.sig[0] = k.sig[0] & 0x3F;
+  k.nl = 128;
+  k.sl = 128;
+  tc_ok(label + " 1024 bit key", !verify(&k, pss));
+
+  // A key over 4096 bits (the 4096 bit modulus with a 0x01 byte in front)
+  // is refused.
+  if (c.nl == 512) {
+    var g: RsaCase = c;
+    i = c.nl;
+    while (i > 0) {
+      g.n[i] = c.n[i - 1];
+      g.sig[i] = c.sig[i - 1];
+      i = i - 1;
+    }
+    g.n[0] = 1;
+    g.sig[0] = 0;
+    g.nl = c.nl + 1;
+    g.sl = c.nl + 1;
+    tc_ok(label + " key over 4096 bits", !verify(&g, pss));
+  }
+
+  // Null pointers and negative lengths.
+  if (pss) {
+    tc_ok(label + " null signature", !cr_rsa_verify_pss(0, c.sl, &c.msg[0], c.ml, c.hash, &c.n[0], c.nl, &c.e[0], c.el));
+    tc_ok(label + " null modulus", !cr_rsa_verify_pss(&c.sig[0], c.sl, &c.msg[0], c.ml, c.hash, 0, c.nl, &c.e[0], c.el));
+    tc_ok(label + " null exponent", !cr_rsa_verify_pss(&c.sig[0], c.sl, &c.msg[0], c.ml, c.hash, &c.n[0], c.nl, 0, c.el));
+    tc_ok(label + " null message", cr_rsa_verify_pss(&c.sig[0], c.sl, 0, c.ml, c.hash, &c.n[0], c.nl, &c.e[0], c.el) == (c.ml == 0));
+    tc_ok(label + " negative message length", !cr_rsa_verify_pss(&c.sig[0], c.sl, &c.msg[0], -1, c.hash, &c.n[0], c.nl, &c.e[0], c.el));
+    tc_ok(label + " negative signature length", !cr_rsa_verify_pss(&c.sig[0], -1, &c.msg[0], c.ml, c.hash, &c.n[0], c.nl, &c.e[0], c.el));
+  } else {
+    tc_ok(label + " null signature", !cr_rsa_verify_pkcs1(0, c.sl, &c.msg[0], c.ml, c.hash, &c.n[0], c.nl, &c.e[0], c.el));
+    tc_ok(label + " null modulus", !cr_rsa_verify_pkcs1(&c.sig[0], c.sl, &c.msg[0], c.ml, c.hash, 0, c.nl, &c.e[0], c.el));
+    tc_ok(label + " null exponent", !cr_rsa_verify_pkcs1(&c.sig[0], c.sl, &c.msg[0], c.ml, c.hash, &c.n[0], c.nl, 0, c.el));
+    tc_ok(label + " null message", cr_rsa_verify_pkcs1(&c.sig[0], c.sl, 0, c.ml, c.hash, &c.n[0], c.nl, &c.e[0], c.el) == (c.ml == 0));
+    tc_ok(label + " negative message length", !cr_rsa_verify_pkcs1(&c.sig[0], c.sl, &c.msg[0], -1, c.hash, &c.n[0], c.nl, &c.e[0], c.el));
+    tc_ok(label + " negative signature length", !cr_rsa_verify_pkcs1(&c.sig[0], -1, &c.msg[0], c.ml, c.hash, &c.n[0], c.nl, &c.e[0], c.el));
+  }
+}
+
+fn time_row(label: string, row: string, pss: bool) {
+  var c: RsaCase;
+  tc_ok(label + " timing fields", load(&c, row) && c.ok);
+  var iters: int64 = 100;
+  var t0: int64 = bench_time_us();
+  var good: int64 = 0;
+  for it in 0..iters {
+    if (verify(&c, pss)) { good = good + 1; }
+  }
+  var t1: int64 = bench_time_us();
+  tc_ok(label + " timing verdicts", good == iters);
+  var per: int64 = (t1 - t0) * 1000 / iters;
+  println("time " + label + ": {per / 1000}.{(per % 1000) / 100} us per verify ({iters} runs)");
+}
+
+fn main() -> int32 {
+  rows_cavp_15();
+  rows_cavp_pss();
+  rows_wp_pkcs1();
+  rows_wp_pss();
+  tc_ok("valid rows seen", g_rows_v > 0 && g_rows_i > 0);
+  println("rows: {g_rows_v} valid, {g_rows_i} invalid");
+  edges("pkcs1 2048 edge", g_first_pkcs1_2048, false);
+  edges("pkcs1 4096 edge", g_first_pkcs1_4096, false);
+  edges("pss 2048 edge", g_first_pss_2048, true);
+  edges("pss 4096 edge", g_first_pss_4096, true);
+  time_row("pkcs1 2048", g_first_pkcs1_2048, false);
+  time_row("pkcs1 4096", g_first_pkcs1_4096, false);
+  time_row("pss 2048", g_first_pss_2048, true);
+  time_row("pss 4096", g_first_pss_4096, true);
+  return tc_finish("rsa");
+}
