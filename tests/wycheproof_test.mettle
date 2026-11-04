@@ -1,18 +1,18 @@
-// Project Wycheproof vectors (tests/vec_wp_*.mettle): X25519, Ed25519 verify,
+// Project Wycheproof vectors (tests/vectors/vec_wp_*.mettle): X25519, Ed25519 verify,
 // ChaCha20-Poly1305,
 // XChaCha20-Poly1305, HMAC-SHA1/256/512 and HKDF-SHA256. The last field of each
 // row is "v" (must succeed and match) or "i" (must be rejected).
 import "crypto/crypto";
-import "crypto/sha1";
+import "crypto/hash/sha1";
 import "tcheck";
-import "vec_wp_x25519";
-import "vec_wp_ed25519";
-import "vec_wp_chachapoly";
-import "vec_wp_xchachapoly";
-import "vec_wp_hmac_sha1";
-import "vec_wp_hmac_sha256";
-import "vec_wp_hmac_sha512";
-import "vec_wp_hkdf";
+import "vectors/vec_wp_x25519";
+import "vectors/vec_wp_ed25519";
+import "vectors/vec_wp_chachapoly";
+import "vectors/vec_wp_xchachapoly";
+import "vectors/vec_wp_hmac_sha1";
+import "vectors/vec_wp_hmac_sha256";
+import "vectors/vec_wp_hmac_sha512";
+import "vectors/vec_wp_hkdf";
 
 // Parses an unpadded lowercase hex number.
 fn wp_parse_hex_int(s: string) -> int64 {

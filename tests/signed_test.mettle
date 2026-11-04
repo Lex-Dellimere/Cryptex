@@ -2,10 +2,10 @@
 // with key rotation, purpose separation, tampering, malformed input,
 // capacity and argument checks.
 import "std/mem";
-import "crypto/status";
-import "crypto/types";
-import "crypto/core";
-import "crypto/signed";
+import "crypto/core/status";
+import "crypto/core/types";
+import "crypto/core/util";
+import "crypto/recipes/signed";
 import "tcheck";
 
 fn str_eq_buf(buf: uint8*, n: int64, want: string) -> bool {

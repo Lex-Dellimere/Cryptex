@@ -14,9 +14,9 @@
 // Signature verification works on public data only and uses variable-time
 // code (the scalar loop, the point decoding and the small-order tests).
 
-import "status";
-import "core";
-import "sha2";
+import "crypto/core/status";
+import "crypto/core/util";
+import "crypto/hash/sha2";
 
 // Field constants as 16 limbs of 16 bits (little endian).
 var g_crx_c25_d: int64[16] = [0x78a3, 0x1359, 0x4dca, 0x75eb, 0xd8ab, 0x4141, 0x0a4d, 0x0070, 0xe898, 0x7779, 0x4079, 0x8cc7, 0xfe73, 0x2b6f, 0x6cee, 0x5203];

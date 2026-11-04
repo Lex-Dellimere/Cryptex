@@ -3,9 +3,9 @@
 // through the syscall built-in (Linux x86-64 and AArch64); there is no foreign code and no shared state,
 // so every function in this library may be called from any thread.
 
-import "status";
-import "sys_x86_64" if x86_64;
-import "sys_aarch64" if aarch64;
+import "crypto/core/status";
+import "crypto/core/sys_x86_64" if x86_64;
+import "crypto/core/sys_aarch64" if aarch64;
 
 // Largest request getrandom(2) is asked for in one call (the kernel returns
 // at most 33554431 bytes per call anyway).

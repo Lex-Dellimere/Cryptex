@@ -3,7 +3,7 @@ import "mbuild/api";
 // A minimal dependent of crypto: no link flags, no C settings of its own.
 // It must build and run with only the dependency below.
 fn project() {
-  mb_package("crypto_dependent", "0.1.0");
+  mb_package("crypto_example", "0.1.0");
 }
 
 fn deps() {

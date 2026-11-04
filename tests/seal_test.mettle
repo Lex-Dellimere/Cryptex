@@ -2,11 +2,11 @@
 // cr_aead_decrypt, the version byte, the draft-irtf-cfrg-xchacha A.3.1
 // vector (rejected: its nonce does not start with version 1), round trips, fresh nonces, fail-closed
 // opening (tamper, wrong ad/key, short input, capacity) and argument checks.
-import "crypto/status";
-import "crypto/types";
-import "crypto/core";
-import "crypto/aead";
-import "crypto/seal";
+import "crypto/core/status";
+import "crypto/core/types";
+import "crypto/core/util";
+import "crypto/cipher/aead";
+import "crypto/recipes/seal";
 import "tcheck";
 
 fn main() -> int32 {

@@ -3,7 +3,7 @@
 // client tx | server rx | server tx).
 import "crypto/crypto";
 import "tcheck";
-import "vec_kx";
+import "vectors/vec_kx";
 
 fn main() -> int32 {
   var csk: CrX25519Secret;

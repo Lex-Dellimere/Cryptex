@@ -3,7 +3,7 @@
 // shared(sk, peer) == shared.
 import "crypto/crypto";
 import "tcheck";
-import "vec_x25519";
+import "vectors/vec_x25519";
 
 fn main() -> int32 {
   var sk: CrX25519Secret;

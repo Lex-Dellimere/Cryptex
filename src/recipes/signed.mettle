@@ -13,11 +13,11 @@
 // sign with keys[0], accept keys[0..n-1], re-sign when key_index > 0.
 
 import "std/conv";
-import "status";
-import "types";
-import "core";
-import "mac";
-import "encode";
+import "crypto/core/status";
+import "crypto/core/types";
+import "crypto/core/util";
+import "crypto/mac/mac";
+import "crypto/core/encode";
 
 /// CR_SIGNED_EXTRA: the bytes cr_signed_sign adds to a value: '.' plus the
 /// 43-character tag.

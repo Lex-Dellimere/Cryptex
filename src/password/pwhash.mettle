@@ -7,10 +7,10 @@
 // standard base64 (A-Z a-z 0-9 + /) without padding.
 
 import "std/conv";
-import "status";
-import "types";
-import "core";
-import "argon2";
+import "crypto/core/status";
+import "crypto/core/types";
+import "crypto/core/util";
+import "crypto/password/argon2";
 
 /// Preset for online logins: Argon2id t=2 passes, m=64 MiB. About 0.1-0.5 s
 /// and 64 MiB of RAM per hash on a desktop core; the right default for web

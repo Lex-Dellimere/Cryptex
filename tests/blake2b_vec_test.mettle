@@ -1,13 +1,13 @@
-// BLAKE2b against libsodium-generated vectors (tests/vec_blake2b.mettle:
-// msg|key|outlen hex|expected; tests/vec_hash.mettle field 3 = unkeyed
+// BLAKE2b against libsodium-generated vectors (tests/vectors/vec_blake2b.mettle:
+// msg|key|outlen hex|expected; tests/vectors/vec_hash.mettle field 3 = unkeyed
 // BLAKE2b-512), through cr_blake2b and through the streaming crx_ core
 // fed in three uneven parts.
 import "std/mem";
 import "crypto/crypto";
-import "crypto/blake2b";
+import "crypto/hash/blake2b";
 import "tcheck";
-import "vec_blake2b";
-import "vec_hash";
+import "vectors/vec_blake2b";
+import "vectors/vec_hash";
 
 fn stream3(out: uint8*, outlen: int64, msg: uint8*, n: int64, key: uint8*, keylen: int64) {
   var s: CrxBlake2b;

@@ -1,9 +1,9 @@
 build/
 .mbuild/
 mettle.deps
-tests/dependent/build/
-tests/dependent/.mbuild/
-tests/dependent/mettle.deps
+examples/basic/build/
+examples/basic/.mbuild/
+examples/basic/mettle.deps
 .claude/
 HANDOFF.md
 reports/

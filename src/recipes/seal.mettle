@@ -10,10 +10,10 @@
 // as CR_E_VERIFY, so a later format can take version 2. Opening fails closed:
 // on any failure no plaintext is released.
 
-import "status";
-import "types";
-import "core";
-import "aead";
+import "crypto/core/status";
+import "crypto/core/types";
+import "crypto/core/util";
+import "crypto/cipher/aead";
 
 /// Bytes a sealed message adds to the plaintext: 24-byte nonce + 16-byte tag.
 /// in: -

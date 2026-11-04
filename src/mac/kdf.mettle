@@ -2,10 +2,10 @@
 // keying material, expand it into output keying material. Pure Mettle on top
 // of the streaming HMAC in mac. Loop bounds depend only on public lengths.
 
-import "status";
-import "types";
-import "core";
-import "mac";
+import "crypto/core/status";
+import "crypto/core/types";
+import "crypto/core/util";
+import "crypto/mac/mac";
 
 /// Size of a pseudorandom key made by cr_hkdf_sha256_extract (the HMAC-SHA256
 /// output size).

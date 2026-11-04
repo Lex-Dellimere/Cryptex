@@ -7,8 +7,8 @@
 // arithmetic is on unsigned types and no index or branch depends on the
 // data, so the code is constant time for secret input.
 
-import "status";
-import "core";
+import "crypto/core/status";
+import "crypto/core/util";
 
 /// internal: SHA-1 running state (chaining value, partial block, byte count).
 export struct CrxSha1 {

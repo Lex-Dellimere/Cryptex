@@ -5,7 +5,7 @@
 // and the argument checks.
 import "crypto/crypto";
 import "tcheck";
-import "vec_chachapoly";
+import "vectors/vec_chachapoly";
 
 fn rfc_vector() {
   var key: CrKey32;

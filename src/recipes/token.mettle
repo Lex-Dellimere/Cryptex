@@ -23,11 +23,11 @@
 // Everything is written with a terminating nul (so it can go straight to C);
 // the reported length excludes it.
 
-import "status";
-import "types";
-import "core";
-import "hash";
-import "mac";
+import "crypto/core/status";
+import "crypto/core/types";
+import "crypto/core/util";
+import "crypto/hash/hash";
+import "crypto/mac/mac";
 
 const CR_TOK_A62: string = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 const CR_TOK_A32: string = "0123456789abcdefghjkmnpqrstvwxyz";

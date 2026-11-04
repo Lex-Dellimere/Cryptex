@@ -5,7 +5,7 @@
 // Constant time: the only branches and loop bounds depend on public lengths
 // and the public block counter; the state words are secret.
 
-import "core";
+import "crypto/core/util";
 
 /// internal: loads 4 bytes as a little-endian uint32.
 export fn crx_ld32(p: uint8*) -> uint32 {

@@ -2,10 +2,10 @@
 // The secret key is 64 bytes: the RFC 8032 32-byte private key
 // (the seed) followed by the public key.
 
-import "status";
-import "types";
-import "core";
-import "curve25519";
+import "crypto/core/status";
+import "crypto/core/types";
+import "crypto/core/util";
+import "crypto/ecc/curve25519";
 
 var g_cr_sign_empty: uint8[1];
 

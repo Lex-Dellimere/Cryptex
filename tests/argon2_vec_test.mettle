@@ -1,13 +1,13 @@
-// Argon2id against libsodium-generated vectors (tests/vec_pwhash.mettle):
+// Argon2id against libsodium-generated vectors (tests/vectors/vec_pwhash.mettle):
 //   raw|pw|salt|ops(hex)|mem(hex, bytes)|expected  -> crx_argon2id
 //   str|pw|text(hex of the ASCII string)           -> cr_pwhash_verify and
 //                                                     cr_pwhash_needs_rehash
 // plus a cr_pwhash_str round trip and the format of the string it writes.
 import "std/mem";
 import "crypto/crypto";
-import "crypto/argon2";
+import "crypto/password/argon2";
 import "tcheck";
-import "vec_pwhash";
+import "vectors/vec_pwhash";
 
 fn hex_u32(h: string) -> uint32 {
   var v: uint32 = 0;

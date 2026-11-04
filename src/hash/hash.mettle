@@ -9,11 +9,11 @@
 // None of these is a password hash (use cr_pwhash_str) or a MAC (use
 // cr_hmac_* or keyed BLAKE2b).
 
-import "status";
-import "types";
-import "core";
-import "blake2b";
-import "sha2";
+import "crypto/core/status";
+import "crypto/core/types";
+import "crypto/core/util";
+import "crypto/hash/blake2b";
+import "crypto/hash/sha2";
 
 /// Smallest BLAKE2b output length cr_blake2b accepts (a hash shorter than this is too weak to be useful).
 /// in: - 

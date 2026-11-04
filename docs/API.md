@@ -4,10 +4,10 @@ Generated from the `///` contracts in `src/`. Do not edit by hand.
 
 Pure Mettle: no C, no shared state. Every function is safe on any thread.
 
-Primitives: [status](#status), [types](#types), [core](#core), [hash](#hash), [mac](#mac), [kdf](#kdf), [pwhash](#pwhash), [aead](#aead), [kx](#kx), [sign](#sign), [encode](#encode).
-Recipes: [signed](#signed), [token](#token), [seal](#seal), [totp](#totp).
+Primitives: [core/status](#corestatus), [core/types](#coretypes), [core/util](#coreutil), [core/encode](#coreencode), [hash/hash](#hashhash), [mac/mac](#macmac), [mac/kdf](#mackdf), [password/pwhash](#passwordpwhash), [cipher/aead](#cipheraead), [ecc/kx](#ecckx), [ecc/sign](#eccsign).
+Recipes: [recipes/signed](#recipessigned), [recipes/token](#recipestoken), [recipes/seal](#recipesseal), [recipes/totp](#recipestotp).
 
-## status
+## core/status
 
 Status codes shared by every crypto module.
 
@@ -172,7 +172,7 @@ Names a status code for logs.
 println(cr_status_name(rc));
 ```
 
-## types
+## core/types
 
 Fixed-size value types. Sizes are part of the type, so a nonce cannot be passed where a key is expected and no length can be mixed up. Each type is one field, `b`, the raw bytes; address them as &v.b[0].
 
@@ -446,7 +446,7 @@ An Argon2id password hash in its self-describing, nul-terminated PHC string form
 var h: CrPwHash; cr_pwhash_str(&h, pw.chars, (int64)pw.length, CR_PW_INTERACTIVE);
 ```
 
-## core
+## core/util
 
 Initialization (a no-op), randomness, constant-time comparison and wiping. Pure Mettle: randomness comes from the Linux getrandom(2) system call through the syscall built-in (Linux x86-64 and AArch64); there is no foreign code and no shared state, so every function in this library may be called from any thread.
 
@@ -551,7 +551,113 @@ Checks in constant time whether all n bytes are zero: the time depends on n only
 if (cr_is_zero(&shared.b[0], 32)) { reject(); }
 ```
 
-## hash
+## core/encode
+
+Encodings for tokens and keys: lowercase hex and base64url without padding (RFC 4648 section 5). Pure Mettle and constant time in the data: characters and values are converted with arithmetic masks only, with no table lookup and no branch on a byte's value, so encoding or decoding a secret does not leak it through timing. Branches depend on lengths only.
+
+### cr_hex_encoded_cap
+
+```mettle
+export fn cr_hex_encoded_cap(n: int64) -> int64
+```
+
+Capacity cr_hex_encode needs for n input bytes: 2n + 1 (the nul).
+
+- **in:** n >= 0
+- **returns:** 2n + 1, or -1 for a negative or absurdly large n
+- **owns:** nothing
+- **thread:** any thread (pure)
+
+```mettle
+var cap: int64 = cr_hex_encoded_cap(32);  // 65
+```
+
+### cr_base64url_encoded_cap
+
+```mettle
+export fn cr_base64url_encoded_cap(n: int64) -> int64
+```
+
+Capacity cr_base64url_encode needs for n input bytes, nul included: (4n + 2) / 3 + 1.
+
+- **in:** n >= 0
+- **returns:** the capacity, or -1 for a negative or absurdly large n
+- **owns:** nothing
+- **thread:** any thread (pure)
+
+```mettle
+var cap: int64 = cr_base64url_encoded_cap(32);  // 44
+```
+
+### cr_hex_encode
+
+```mettle
+export fn cr_hex_encode(out: uint8*, out_cap: int64, out_len: int64*, bin: uint8*, n: int64) -> int32
+```
+
+Encodes n bytes as lowercase hex.
+
+- **in:** out writable for out_cap >= cr_hex_encoded_cap(n) bytes; out_len; bin/n
+- **returns:** CR_OK and *out_len = 2n (text followed by a nul); CR_E_ARG; CR_E_SPACE if out_cap is too small (nothing written). On error *out_len = 0
+- **owns:** nothing; the caller owns out
+- **thread:** any thread (no shared state)
+
+```mettle
+var hx: uint8[65]; var hl: int64; cr_hex_encode(&hx[0], 65, &hl, &d.b[0], 32);
+```
+
+### cr_hex_decode
+
+```mettle
+export fn cr_hex_decode(out: uint8*, out_cap: int64, out_len: int64*, text: uint8*, n: int64) -> int32
+```
+
+Decodes hex (either case) strictly.
+
+- **in:** out writable for out_cap bytes; out_len; text/n, the hex digits (no nul needed)
+- **returns:** CR_OK and *out_len = n / 2; CR_E_DECODE for an odd length or any non-hex character (including spaces and a trailing nul); CR_E_SPACE if out_cap < n / 2; CR_E_ARG. On error *out_len = 0 and out's first out_cap bytes are wiped
+- **owns:** nothing; the caller owns out
+- **thread:** any thread (no shared state)
+
+```mettle
+var k: uint8[32]; var kl: int64; cr_hex_decode(&k[0], 32, &kl, s.chars, (int64)s.length);
+```
+
+### cr_base64url_encode
+
+```mettle
+export fn cr_base64url_encode(out: uint8*, out_cap: int64, out_len: int64*, bin: uint8*, n: int64) -> int32
+```
+
+Encodes n bytes as base64url without padding (alphabet A-Z a-z 0-9 - _), the form used in URLs, cookies and tokens.
+
+- **in:** out writable for out_cap >= cr_base64url_encoded_cap(n) bytes; out_len; bin/n
+- **returns:** CR_OK and *out_len = the text length (a nul follows it); CR_E_ARG; CR_E_SPACE if out_cap is too small (nothing written). On error *out_len = 0
+- **owns:** nothing; the caller owns out
+- **thread:** any thread (no shared state)
+
+```mettle
+var t: uint8[44]; var tl: int64; cr_base64url_encode(&t[0], 44, &tl, &raw[0], 32);
+```
+
+### cr_base64url_decode
+
+```mettle
+export fn cr_base64url_decode(out: uint8*, out_cap: int64, out_len: int64*, text: uint8*, n: int64) -> int32
+```
+
+Decodes unpadded base64url strictly.
+
+- **in:** out writable for out_cap bytes; out_len; text/n (no nul needed)
+- **returns:** CR_OK and *out_len = the decoded length; CR_E_DECODE for any character outside the base64url alphabet (including '=', '+', '/', spaces), a length of the form 4k+1, or non-zero trailing bits; CR_E_SPACE if out_cap < floor(3n / 4); CR_E_ARG. On error *out_len = 0 and out's first out_cap bytes are wiped
+- **owns:** nothing; the caller owns out
+- **thread:** any thread (no shared state)
+
+```mettle
+var raw: uint8[32]; var rl: int64; cr_base64url_decode(&raw[0], 32, &rl, t.chars, (int64)t.length);
+```
+
+## hash/hash
 
 Hashes: SHA-256, SHA-512 (FIPS 180-4, sha2) and BLAKE2b (RFC 7693, blake2b), all pure Mettle.
 
@@ -858,7 +964,7 @@ Finishes a streaming BLAKE2b hash and writes the digest. Always wipes st, also o
 var d: uint8[32]; cr_blake2b_final(&st, &d[0], 32);
 ```
 
-## mac
+## mac/mac
 
 HMAC-SHA256 and HMAC-SHA512 (RFC 2104, FIPS 198-1) with keys of any length, in pure Mettle on top of sha2. The state keeps two running hashes (inner, outer) that were primed with the key pads, so no key copy stays around. Verification is constant time (cr_equal).
 
@@ -1102,7 +1208,7 @@ Checks an HMAC-SHA512 tag in constant time: recomputes the tag and compares with
 if (!cr_hmac_sha512_verify(&t, &k[0], 32, m.chars, (int64)m.length)) { reject(); }
 ```
 
-## kdf
+## mac/kdf
 
 HKDF with HMAC-SHA256 (RFC 5869): extract a pseudorandom key from input keying material, expand it into output keying material. Pure Mettle on top of the streaming HMAC in mac. Loop bounds depend only on public lengths.
 
@@ -1187,7 +1293,7 @@ HKDF-SHA256 in one call: extract with salt and ikm, then expand with info (RFC 5
 var k: uint8[32]; cr_hkdf_sha256(&k[0], 32, &salt[0], 16, &ikm[0], 32, info.chars, (int64)info.length);
 ```
 
-## pwhash
+## password/pwhash
 
 Password hashing: Argon2id (RFC 9106), pure Mettle (argon2.mettle).
 
@@ -1341,7 +1447,7 @@ Loads a stored hash string into a CrPwHash. Only the shape is checked here (leng
 var h: CrPwHash; if (cr_pwhash_from_text(&h, row.hash) == CR_OK) { ... }
 ```
 
-## aead
+## cipher/aead
 
 Authenticated encryption, in pure Mettle: XChaCha20-Poly1305-IETF (draft-irtf-cfrg-xchacha-03 on top of RFC 8439) and the plain IETF ChaCha20-Poly1305 of RFC 8439 section 2.8 with a 12-byte nonce.
 
@@ -1463,7 +1569,7 @@ Verifies and decrypts ct (ciphertext || tag) produced by cr_chacha20poly1305_enc
 if (cr_chacha20poly1305_decrypt(&pt[0], 64, &plen, &ct[0], clen, 0, 0, &nonce, &k) != CR_OK) { reject(); }
 ```
 
-## kx
+## ecc/kx
 
 Key exchange: X25519 (RFC 7748), in pure Mettle, and a session-key derivation (BLAKE2b-512 of the X25519 point and both public keys, split into a receive key and a transmit key).
 
@@ -1552,7 +1658,7 @@ Derives the server's session keys: rx decrypts what the client sends, tx encrypt
 cr_kx_server_session_keys(&rx, &tx, &spk, &ssk, &cpk);
 ```
 
-## sign
+## ecc/sign
 
 Signatures: Ed25519 (RFC 8032 section 5.1), in pure Mettle, detached form. The secret key is 64 bytes: the RFC 8032 32-byte private key (the seed) followed by the public key.
 
@@ -1624,113 +1730,7 @@ Verifies a detached Ed25519 signature (rejecting a non-canonical S, and non-cano
 if (!cr_ed25519_verify(&sig, m.chars, (int64)m.length, &pk)) { reject(); }
 ```
 
-## encode
-
-Encodings for tokens and keys: lowercase hex and base64url without padding (RFC 4648 section 5). Pure Mettle and constant time in the data: characters and values are converted with arithmetic masks only, with no table lookup and no branch on a byte's value, so encoding or decoding a secret does not leak it through timing. Branches depend on lengths only.
-
-### cr_hex_encoded_cap
-
-```mettle
-export fn cr_hex_encoded_cap(n: int64) -> int64
-```
-
-Capacity cr_hex_encode needs for n input bytes: 2n + 1 (the nul).
-
-- **in:** n >= 0
-- **returns:** 2n + 1, or -1 for a negative or absurdly large n
-- **owns:** nothing
-- **thread:** any thread (pure)
-
-```mettle
-var cap: int64 = cr_hex_encoded_cap(32);  // 65
-```
-
-### cr_base64url_encoded_cap
-
-```mettle
-export fn cr_base64url_encoded_cap(n: int64) -> int64
-```
-
-Capacity cr_base64url_encode needs for n input bytes, nul included: (4n + 2) / 3 + 1.
-
-- **in:** n >= 0
-- **returns:** the capacity, or -1 for a negative or absurdly large n
-- **owns:** nothing
-- **thread:** any thread (pure)
-
-```mettle
-var cap: int64 = cr_base64url_encoded_cap(32);  // 44
-```
-
-### cr_hex_encode
-
-```mettle
-export fn cr_hex_encode(out: uint8*, out_cap: int64, out_len: int64*, bin: uint8*, n: int64) -> int32
-```
-
-Encodes n bytes as lowercase hex.
-
-- **in:** out writable for out_cap >= cr_hex_encoded_cap(n) bytes; out_len; bin/n
-- **returns:** CR_OK and *out_len = 2n (text followed by a nul); CR_E_ARG; CR_E_SPACE if out_cap is too small (nothing written). On error *out_len = 0
-- **owns:** nothing; the caller owns out
-- **thread:** any thread (no shared state)
-
-```mettle
-var hx: uint8[65]; var hl: int64; cr_hex_encode(&hx[0], 65, &hl, &d.b[0], 32);
-```
-
-### cr_hex_decode
-
-```mettle
-export fn cr_hex_decode(out: uint8*, out_cap: int64, out_len: int64*, text: uint8*, n: int64) -> int32
-```
-
-Decodes hex (either case) strictly.
-
-- **in:** out writable for out_cap bytes; out_len; text/n, the hex digits (no nul needed)
-- **returns:** CR_OK and *out_len = n / 2; CR_E_DECODE for an odd length or any non-hex character (including spaces and a trailing nul); CR_E_SPACE if out_cap < n / 2; CR_E_ARG. On error *out_len = 0 and out's first out_cap bytes are wiped
-- **owns:** nothing; the caller owns out
-- **thread:** any thread (no shared state)
-
-```mettle
-var k: uint8[32]; var kl: int64; cr_hex_decode(&k[0], 32, &kl, s.chars, (int64)s.length);
-```
-
-### cr_base64url_encode
-
-```mettle
-export fn cr_base64url_encode(out: uint8*, out_cap: int64, out_len: int64*, bin: uint8*, n: int64) -> int32
-```
-
-Encodes n bytes as base64url without padding (alphabet A-Z a-z 0-9 - _), the form used in URLs, cookies and tokens.
-
-- **in:** out writable for out_cap >= cr_base64url_encoded_cap(n) bytes; out_len; bin/n
-- **returns:** CR_OK and *out_len = the text length (a nul follows it); CR_E_ARG; CR_E_SPACE if out_cap is too small (nothing written). On error *out_len = 0
-- **owns:** nothing; the caller owns out
-- **thread:** any thread (no shared state)
-
-```mettle
-var t: uint8[44]; var tl: int64; cr_base64url_encode(&t[0], 44, &tl, &raw[0], 32);
-```
-
-### cr_base64url_decode
-
-```mettle
-export fn cr_base64url_decode(out: uint8*, out_cap: int64, out_len: int64*, text: uint8*, n: int64) -> int32
-```
-
-Decodes unpadded base64url strictly.
-
-- **in:** out writable for out_cap bytes; out_len; text/n (no nul needed)
-- **returns:** CR_OK and *out_len = the decoded length; CR_E_DECODE for any character outside the base64url alphabet (including '=', '+', '/', spaces), a length of the form 4k+1, or non-zero trailing bits; CR_E_SPACE if out_cap < floor(3n / 4); CR_E_ARG. On error *out_len = 0 and out's first out_cap bytes are wiped
-- **owns:** nothing; the caller owns out
-- **thread:** any thread (no shared state)
-
-```mettle
-var raw: uint8[32]; var rl: int64; cr_base64url_decode(&raw[0], 32, &rl, t.chars, (int64)t.length);
-```
-
-## signed
+## recipes/signed
 
 Signed values, pure Mettle: "value.SIG", a readable value with an HMAC-SHA256 tag (RFC 2104). SIG = base64url, no padding (always 43 chars), of HMAC-SHA256(key, le64(len(purpose)) || purpose || value) where le64 is the purpose length as 8 bytes, little endian. The purpose ("remember", "unsubscribe") separates uses: a value signed for one purpose does not verify for another. The value stays readable by anyone; only key holders can produce a valid tag. The format is byte-compatible with the session library's signed values (same formula).
 
@@ -1850,7 +1850,7 @@ Verifies a "value.EXP.SIG" string against up to 8 keys for a purpose, then check
 var v: string; var ki: int32; if (cr_signed_verify_until(&v, &ki, &keys[0], 2, "confirm-email", token, now) == CR_OK) { ... }
 ```
 
-## token
+## recipes/token
 
 Machine tokens and human codes, pure Mettle (SHA-256 per FIPS 180-4 and HMAC-SHA256 per RFC 2104). They look alike (random characters from an alphabet) but they are different things and are stored differently.
 
@@ -2085,7 +2085,7 @@ Hashes a human code for storage: out = HMAC-SHA256(pepper, "cryptex/code/v1" || 
 var tag: CrHmacSha256; cr_code_hash(&tag, &pepper, typed);  // WHERE tag = ?
 ```
 
-## seal
+## recipes/seal
 
 Sealed messages, pure Mettle: XChaCha20-Poly1305 (draft-irtf-cfrg-xchacha on RFC 8439) with the nonce carried inside the output, so callers never handle nonces.
 
@@ -2155,7 +2155,7 @@ Verifies and decrypts a message produced by cr_seal with the same key and ad. Fa
 if (cr_open(&pt[0], 128, &plen, &box[0], blen, 0, 0, &k) != CR_OK) { reject(); }
 ```
 
-## totp
+## recipes/totp
 
 Time-based and counter-based one-time passwords for two-factor sign-in: HOTP (RFC 4226), TOTP (RFC 6238), the base32 text people type or scan (RFC 4648) and the otpauth:// provisioning URI that authenticator apps import (as a QR code). Pure Mettle on top of an internal HMAC-SHA1, which is what every authenticator app speaks; plain SHA-1 is not exposed.
 

@@ -1,13 +1,13 @@
 // Streaming SHA-256, SHA-512 and BLAKE2b through the public API
 // (cr_<hash>_init/_update/_final), against the libsodium-generated vectors:
-// tests/vec_hash.mettle (msg|sha256|sha512|blake2b-512) and
-// tests/vec_blake2b.mettle (msg|key|outlen hex|expected). Every message is
+// tests/vectors/vec_hash.mettle (msg|sha256|sha512|blake2b-512) and
+// tests/vectors/vec_blake2b.mettle (msg|key|outlen hex|expected). Every message is
 // fed in pieces of 1, 7, 64 and 1000 bytes and as one piece; the state must
 // be all zero after _final; argument errors are checked at the end.
 import "crypto/crypto";
 import "tcheck";
-import "vec_hash";
-import "vec_blake2b";
+import "vectors/vec_hash";
+import "vectors/vec_blake2b";
 
 fn piece(k: int32, n: int64) -> int64 {
   if (k == 0) { return 1; }

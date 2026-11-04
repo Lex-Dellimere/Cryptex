@@ -77,6 +77,22 @@ fn main() -> int32 {
 
 SHA-1 is inside, but only for TOTP. It is not offered on its own.
 
+## Layout
+
+```
+src/crypto.mettle   the facade: import "crypto/crypto" gives you everything
+src/core/           status codes, types, random, compare, wipe, hex/base64url
+src/hash/           SHA-256, SHA-512, BLAKE2b (SHA-1 is internal, for TOTP)
+src/mac/            HMAC, HKDF
+src/cipher/         XChaCha20-Poly1305, ChaCha20-Poly1305
+src/ecc/            X25519 key exchange, Ed25519 signatures
+src/password/       Argon2id password hashing
+src/recipes/        signed values, tokens and codes, seal/open, TOTP
+tests/              test programs; test data in tests/vectors/
+examples/basic/     a small project that uses the library
+docs/API.md         every public function
+```
+
 ## Rules
 
 - **Names:** functions `cr_`, types `Cr`, constants `CR_`. Names starting `crx_` are internal.
@@ -108,10 +124,10 @@ mbuild test -r     # release
 Each `tests/<name>_test.mettle` is a test program. Two kinds of checks:
 
 - **Standard vectors** from the RFCs and FIPS documents.
-- **Wycheproof:** 1,954 known-hard edge cases from Google's Wycheproof project (X25519, Ed25519, both ChaCha20-Poly1305 forms, HMAC-SHA1/256/512, HKDF) in `tests/vec_wp_*.mettle`.
-- **libsodium vectors:** `tests/vec_*.mettle`, thousands of random cases computed by libsodium (and Python for SHA-1 and HKDF). Cryptex must match them byte for byte. The library and its tests do not need libsodium.
+- **Wycheproof:** 1,954 known-hard edge cases from Google's Wycheproof project (X25519, Ed25519, both ChaCha20-Poly1305 forms, HMAC-SHA1/256/512, HKDF) in `tests/vectors/vec_wp_*.mettle`.
+- **libsodium vectors:** `tests/vectors/vec_*.mettle`, thousands of random cases computed by libsodium (and Python for SHA-1 and HKDF). Cryptex must match them byte for byte. The library and its tests do not need libsodium.
 
-`tests/dependent` is a small project that uses Cryptex the way your project would. Check it with `cd tests/dependent && mbuild run`.
+`examples/basic` is a small project that uses Cryptex the way your project would. Run it with `cd examples/basic && mbuild run`.
 
 ## Docs
 

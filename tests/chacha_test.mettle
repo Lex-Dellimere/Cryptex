@@ -1,9 +1,9 @@
 // ChaCha20, Poly1305 and HChaCha20 internals against the published vectors:
 // RFC 8439 2.3.2, 2.4.2, 2.5.2, 2.6.2, 2.8.2 and draft-irtf-cfrg-xchacha-03
 // 2.2.1. Also streaming splits for Poly1305 and in-place XOR.
-import "crypto/chacha";
-import "crypto/poly1305";
-import "crypto/core";
+import "crypto/cipher/chacha";
+import "crypto/cipher/poly1305";
+import "crypto/core/util";
 import "tcheck";
 
 fn seq_key(k: uint8*) {

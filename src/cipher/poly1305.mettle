@@ -5,8 +5,8 @@
 // the message bytes; only on public lengths. The final reduction picks h or
 // h - p with a mask.
 
-import "core";
-import "chacha";
+import "crypto/core/util";
+import "crypto/cipher/chacha";
 
 /// internal: Poly1305 state (clamped r, accumulator h in 26-bit limbs, the
 /// s pad, and a 16-byte partial-block buffer).

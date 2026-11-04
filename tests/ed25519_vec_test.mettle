@@ -4,7 +4,7 @@
 // or a non-canonical S (S + L), is rejected.
 import "crypto/crypto";
 import "tcheck";
-import "vec_ed25519";
+import "vectors/vec_ed25519";
 
 // The group order L, little endian.
 var g_l: uint8[32] = [

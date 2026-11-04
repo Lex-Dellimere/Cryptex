@@ -1,0 +1,23 @@
+// A project that uses Cryptex: encrypt a value and decrypt it again.
+//   cd examples/basic && mbuild run
+import "std/io";
+import "crypto/crypto";
+
+fn main() -> int32 {
+  var k: CrKey32;
+  if (cr_aead_keygen(&k) != CR_OK) { return 1; }
+  defer cr_wipe(&k.b[0], 32);
+
+  var msg: string = "hello";
+  var box: uint8[64];
+  var blen: int64 = 0;
+  if (cr_seal(&box[0], 64, &blen, msg.chars, (int64)msg.length, 0, 0, &k) != CR_OK) { return 1; }
+
+  var out: uint8[64];
+  var olen: int64 = 0;
+  if (cr_open(&out[0], 64, &olen, &box[0], blen, 0, 0, &k) != CR_OK) { return 1; }
+  if (olen != (int64)msg.length || !cr_equal(&out[0], msg.chars, olen)) { return 1; }
+
+  println("sealed {blen} bytes, opened {olen}: ok");
+  return 0;
+}

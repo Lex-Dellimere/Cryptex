@@ -1,15 +1,15 @@
 // SHA-1 / HMAC-SHA1 (internal) against FIPS 180-4, RFC 2202 and every row of
-// tests/vec_sha1.mettle; HOTP (RFC 4226 Appendix D), TOTP (RFC 6238
+// tests/vectors/vec_sha1.mettle; HOTP (RFC 4226 Appendix D), TOTP (RFC 6238
 // Appendix B), verification with a window, base32 (RFC 4648 section 10) and
 // the otpauth:// URI.
-import "crypto/status";
-import "crypto/types";
-import "crypto/core";
-import "crypto/sha1";
-import "crypto/totp";
+import "crypto/core/status";
+import "crypto/core/types";
+import "crypto/core/util";
+import "crypto/hash/sha1";
+import "crypto/recipes/totp";
 import "std/mem";
 import "tcheck";
-import "vec_sha1";
+import "vectors/vec_sha1";
 
 // SHA-1 of a string, one shot, as hex.
 fn sha1_hex(msg: string) -> string {

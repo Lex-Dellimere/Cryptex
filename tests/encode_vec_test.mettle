@@ -1,9 +1,9 @@
-// hex and base64url against libsodium-generated vectors (tests/vec_encode.mettle):
+// hex and base64url against libsodium-generated vectors (tests/vectors/vec_encode.mettle):
 // each row is bytes|base64url text (as hex of its ASCII). Checks encode,
 // decode back to the bytes, and the hex encode/decode round trip.
 import "crypto/crypto";
 import "tcheck";
-import "vec_encode";
+import "vectors/vec_encode";
 
 fn main() -> int32 {
   var all_ok: bool = true;
