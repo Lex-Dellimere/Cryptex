@@ -1085,6 +1085,54 @@ Finishes a streaming BLAKE2b hash and writes the digest. Always wipes st, also o
 var d: uint8[32]; cr_blake2b_final(&st, &d[0], 32);
 ```
 
+### CR_HASH_SHA256
+
+```mettle
+export const CR_HASH_SHA256: int32 = 1;
+```
+
+names SHA-256 for functions that take a hash choice (ECDSA, RSA).
+
+- **returns:** 1
+- **owns:** nothing
+- **thread:** constant
+
+```mettle
+cr_p256_ecdsa_verify(&sig[0], sl, m, n, CR_HASH_SHA256, &pk[0], 65)
+```
+
+### CR_HASH_SHA384
+
+```mettle
+export const CR_HASH_SHA384: int32 = 2;
+```
+
+names SHA-384 for functions that take a hash choice (ECDSA, RSA).
+
+- **returns:** 2
+- **owns:** nothing
+- **thread:** constant
+
+```mettle
+cr_rsa_verify_pss(&sig[0], sl, m, n, CR_HASH_SHA384, mod, ml, e, el)
+```
+
+### CR_HASH_SHA512
+
+```mettle
+export const CR_HASH_SHA512: int32 = 3;
+```
+
+names SHA-512 for functions that take a hash choice (ECDSA, RSA).
+
+- **returns:** 3
+- **owns:** nothing
+- **thread:** constant
+
+```mettle
+cr_rsa_verify_pkcs1(&sig[0], sl, m, n, CR_HASH_SHA512, mod, ml, e, el)
+```
+
 ## mac/mac
 
 HMAC-SHA256, HMAC-SHA384 and HMAC-SHA512 (RFC 2104, FIPS 198-1) with keys of any length, in pure Mettle on top of sha2. The state keeps two running hashes (inner, outer) that were primed with the key pads, so no key copy stays around. Verification is constant time (cr_equal).

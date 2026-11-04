@@ -373,3 +373,58 @@ export fn cr_blake2b_final(st: CrBlake2bState*, out: uint8*, outlen: int64) -> i
   crx_blake2b_final(&st->s, out);
   return CR_OK;
 }
+
+/// CR_HASH_SHA256: names SHA-256 for functions that take a hash choice (ECDSA, RSA).
+/// in: -
+/// returns: 1
+/// owns: nothing
+/// thread: constant
+/// example: cr_p256_ecdsa_verify(&sig[0], sl, m, n, CR_HASH_SHA256, &pk[0], 65)
+export const CR_HASH_SHA256: int32 = 1;
+/// CR_HASH_SHA384: names SHA-384 for functions that take a hash choice (ECDSA, RSA).
+/// in: -
+/// returns: 2
+/// owns: nothing
+/// thread: constant
+/// example: cr_rsa_verify_pss(&sig[0], sl, m, n, CR_HASH_SHA384, mod, ml, e, el)
+export const CR_HASH_SHA384: int32 = 2;
+/// CR_HASH_SHA512: names SHA-512 for functions that take a hash choice (ECDSA, RSA).
+/// in: -
+/// returns: 3
+/// owns: nothing
+/// thread: constant
+/// example: cr_rsa_verify_pkcs1(&sig[0], sl, m, n, CR_HASH_SHA512, mod, ml, e, el)
+export const CR_HASH_SHA512: int32 = 3;
+
+/// internal: digest length in bytes for a CR_HASH_* id, or 0 for an unknown id.
+export fn crx_hash_len(id: int32) -> int64 {
+  if (id == CR_HASH_SHA256) { return 32; }
+  if (id == CR_HASH_SHA384) { return 48; }
+  if (id == CR_HASH_SHA512) { return 64; }
+  return 0;
+}
+
+/// internal: hashes msg with the CR_HASH_* id into out (64 bytes of room);
+/// returns the digest length, or 0 for an unknown id or bad arguments.
+export fn crx_hash_msg(out: uint8*, id: int32, msg: uint8*, n: int64) -> int64 {
+  if (out == 0 || n < 0 || (msg == 0 && n > 0)) { return 0; }
+  if (id == CR_HASH_SHA256) {
+    var d: CrSha256;
+    if (cr_sha256(&d, msg, n) != CR_OK) { return 0; }
+    for i in 0..32 { out[i] = d.b[i]; }
+    return 32;
+  }
+  if (id == CR_HASH_SHA384) {
+    var d: CrSha384;
+    if (cr_sha384(&d, msg, n) != CR_OK) { return 0; }
+    for i in 0..48 { out[i] = d.b[i]; }
+    return 48;
+  }
+  if (id == CR_HASH_SHA512) {
+    var d: CrSha512;
+    if (cr_sha512(&d, msg, n) != CR_OK) { return 0; }
+    for i in 0..64 { out[i] = d.b[i]; }
+    return 64;
+  }
+  return 0;
+}
