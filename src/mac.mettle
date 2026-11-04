@@ -1,0 +1,257 @@
+// HMAC-SHA256 and HMAC-SHA512 (RFC 2104, FIPS 198-1) with keys of any
+// length. Backend: libsodium crypto_auth_hmacsha256_* / _hmacsha512_*
+// (init/update/final, so RFC 4231 keys of 4..131 bytes work; libsodium's
+// one-shot crypto_auth_hmacsha256 takes a fixed 32-byte key only).
+// Verification is constant time (sodium_memcmp).
+
+import "status";
+import "types";
+import "core";
+
+var g_cr_mac_empty: uint8[1];
+
+extern fn crypto_auth_hmacsha256_init(st: uint8*, key: uint8*, keylen: uint64) -> int32 = "crypto_auth_hmacsha256_init";
+extern fn crypto_auth_hmacsha256_update(st: uint8*, inp: uint8*, inlen: uint64) -> int32 = "crypto_auth_hmacsha256_update";
+extern fn crypto_auth_hmacsha256_final(st: uint8*, out: uint8*) -> int32 = "crypto_auth_hmacsha256_final";
+extern fn crypto_auth_hmacsha256_statebytes() -> uint64 = "crypto_auth_hmacsha256_statebytes";
+
+/// CrHmacSha256State: an incremental HMAC-SHA256 computation
+/// (crypto_auth_hmacsha256_state, held in caller memory; 256 bytes reserved,
+/// libsodium needs 208).
+/// in: - (initialize with cr_hmac_sha256_init before use)
+/// returns: -
+/// owns: secret (it holds key-derived pads): cr_hmac_sha256_final wipes it;
+///   if you abandon a computation, call cr_wipe(cr_hmac_sha256_state_bytes(&st), 256)
+/// thread: one state per computation; main thread only
+/// example: var st: CrHmacSha256State; cr_hmac_sha256_init(&st, k, klen);
+export struct CrHmacSha256State {
+  st: uint64[32];
+}
+
+/// Gives the address of a state's storage, for cr_wipe.
+/// in: st
+/// returns: a pointer to its 256 bytes (0 if st is 0)
+/// owns: the pointer borrows st; it is caller memory, not libsodium's
+/// thread: main thread only
+/// example: cr_wipe(cr_hmac_sha256_state_bytes(&st), 256);
+export fn cr_hmac_sha256_state_bytes(st: CrHmacSha256State*) -> uint8* {
+  if (st == 0) { return 0; }
+  return (uint8*)&st->st[0];
+}
+
+fn cr_hmac256_state_fits() -> bool {
+  return crypto_auth_hmacsha256_statebytes() <= (uint64)256;
+}
+
+/// Starts an HMAC-SHA256 computation (RFC 2104 / FIPS 198-1) with a key of
+/// any length (longer than the block size it is hashed, as RFC 2104 says).
+/// in: st; key readable for keylen bytes, keylen >= 0 (32+ random bytes
+///   recommended; key may be 0 only when keylen == 0)
+/// returns: CR_OK; CR_E_ARG (null st, null key with keylen > 0,
+///   keylen < 0); CR_E_INIT; CR_E_INTERNAL if the linked libsodium's state
+///   is larger than this binding reserves
+/// owns: st stays the caller's; the key is copied into st's pads, so the
+///   caller may wipe its key right away
+/// thread: main thread only
+/// example: var st: CrHmacSha256State; cr_hmac_sha256_init(&st, &k[0], 32);
+export fn cr_hmac_sha256_init(st: CrHmacSha256State*, key: uint8*, keylen: int64) -> int32 {
+  if (st == 0 || keylen < 0 || (key == 0 && keylen > 0)) { return CR_E_ARG; }
+  if (cr_init() != CR_OK) { return CR_E_INIT; }
+  if (!cr_hmac256_state_fits()) { return CR_E_INTERNAL; }
+  var kp: uint8* = key;
+  if (keylen == 0) { kp = &g_cr_mac_empty[0]; }
+  if (crypto_auth_hmacsha256_init(cr_hmac_sha256_state_bytes(st), kp, (uint64)keylen) != 0) {
+    cr_wipe(cr_hmac_sha256_state_bytes(st), 256);
+    return CR_E_INTERNAL;
+  }
+  return CR_OK;
+}
+
+/// Feeds n more message bytes into an HMAC-SHA256 computation.
+/// in: st from cr_hmac_sha256_init; msg readable for n bytes; n >= 0
+/// returns: CR_OK; CR_E_ARG (null st, null msg with n > 0, n < 0)
+/// owns: nothing new
+/// thread: main thread only
+/// example: cr_hmac_sha256_update(&st, part.chars, (int64)part.length);
+export fn cr_hmac_sha256_update(st: CrHmacSha256State*, msg: uint8*, n: int64) -> int32 {
+  if (st == 0 || n < 0 || (msg == 0 && n > 0)) { return CR_E_ARG; }
+  if (n == 0) { return CR_OK; }
+  if (crypto_auth_hmacsha256_update(cr_hmac_sha256_state_bytes(st), msg, (uint64)n) != 0) { return CR_E_INTERNAL; }
+  return CR_OK;
+}
+
+/// Finishes an HMAC-SHA256 computation, writes the tag and wipes the state.
+/// in: st from cr_hmac_sha256_init; out
+/// returns: CR_OK; CR_E_ARG (null st or out)
+/// owns: st is wiped (start again with cr_hmac_sha256_init to reuse it)
+/// thread: main thread only
+/// example: var t: CrHmacSha256; cr_hmac_sha256_final(&st, &t);
+export fn cr_hmac_sha256_final(st: CrHmacSha256State*, out: CrHmacSha256*) -> int32 {
+  if (st == 0 || out == 0) { return CR_E_ARG; }
+  var rc: int32 = crypto_auth_hmacsha256_final(cr_hmac_sha256_state_bytes(st), &out->b[0]);
+  cr_wipe(cr_hmac_sha256_state_bytes(st), 256);
+  if (rc != 0) { return CR_E_INTERNAL; }
+  return CR_OK;
+}
+
+/// Computes HMAC-SHA256(key, msg) in one call (init + update + final), for a
+/// key of any length.
+/// in: out; key/keylen as cr_hmac_sha256_init; msg/n as cr_hmac_sha256_update
+/// returns: CR_OK; CR_E_ARG; CR_E_INIT; CR_E_INTERNAL. On error out is
+///   left zeroed
+/// owns: nothing; the temporary state is wiped
+/// thread: main thread only
+/// example: var t: CrHmacSha256; cr_hmac_sha256(&t, &k[0], 32, m.chars, (int64)m.length);
+export fn cr_hmac_sha256(out: CrHmacSha256*, key: uint8*, keylen: int64, msg: uint8*, n: int64) -> int32 {
+  if (out == 0) { return CR_E_ARG; }
+  cr_wipe(&out->b[0], 32);
+  var st: CrHmacSha256State;
+  var rc: int32 = cr_hmac_sha256_init(&st, key, keylen);
+  if (rc != CR_OK) { return rc; }
+  rc = cr_hmac_sha256_update(&st, msg, n);
+  if (rc != CR_OK) {
+    cr_wipe(cr_hmac_sha256_state_bytes(&st), 256);
+    return rc;
+  }
+  return cr_hmac_sha256_final(&st, out);
+}
+
+/// Checks an HMAC-SHA256 tag in constant time: recomputes the tag and compares
+/// with sodium_memcmp.
+/// in: tag, the received tag; key/keylen and msg/n as cr_hmac_sha256
+/// returns: true only if the tag is valid; false for a wrong tag and for
+///   every error (fails closed)
+/// owns: nothing; the recomputed tag is wiped
+/// thread: main thread only
+/// example: if (!cr_hmac_sha256_verify(&t, &k[0], 32, m.chars, (int64)m.length)) { reject(); }
+export fn cr_hmac_sha256_verify(tag: CrHmacSha256*, key: uint8*, keylen: int64, msg: uint8*, n: int64) -> bool {
+  if (tag == 0) { return false; }
+  var want: CrHmacSha256;
+  if (cr_hmac_sha256(&want, key, keylen, msg, n) != CR_OK) { return false; }
+  var ok: bool = cr_equal(&want.b[0], &tag->b[0], 32);
+  cr_wipe(&want.b[0], 32);
+  return ok;
+}
+
+extern fn crypto_auth_hmacsha512_init(st: uint8*, key: uint8*, keylen: uint64) -> int32 = "crypto_auth_hmacsha512_init";
+extern fn crypto_auth_hmacsha512_update(st: uint8*, inp: uint8*, inlen: uint64) -> int32 = "crypto_auth_hmacsha512_update";
+extern fn crypto_auth_hmacsha512_final(st: uint8*, out: uint8*) -> int32 = "crypto_auth_hmacsha512_final";
+extern fn crypto_auth_hmacsha512_statebytes() -> uint64 = "crypto_auth_hmacsha512_statebytes";
+
+/// CrHmacSha512State: an incremental HMAC-SHA512 computation
+/// (crypto_auth_hmacsha512_state, held in caller memory; 512 bytes reserved,
+/// libsodium needs 416).
+/// in: - (initialize with cr_hmac_sha512_init before use)
+/// returns: -
+/// owns: secret (it holds key-derived pads): cr_hmac_sha512_final wipes it;
+///   if you abandon a computation, call cr_wipe(cr_hmac_sha512_state_bytes(&st), 512)
+/// thread: one state per computation; main thread only
+/// example: var st: CrHmacSha512State; cr_hmac_sha512_init(&st, k, klen);
+export struct CrHmacSha512State {
+  st: uint64[64];
+}
+
+/// Gives the address of a state's storage, for cr_wipe.
+/// in: st
+/// returns: a pointer to its 512 bytes (0 if st is 0)
+/// owns: the pointer borrows st; it is caller memory, not libsodium's
+/// thread: main thread only
+/// example: cr_wipe(cr_hmac_sha512_state_bytes(&st), 512);
+export fn cr_hmac_sha512_state_bytes(st: CrHmacSha512State*) -> uint8* {
+  if (st == 0) { return 0; }
+  return (uint8*)&st->st[0];
+}
+
+fn cr_hmac512_state_fits() -> bool {
+  return crypto_auth_hmacsha512_statebytes() <= (uint64)512;
+}
+
+/// Starts an HMAC-SHA512 computation (RFC 2104 / FIPS 198-1) with a key of
+/// any length (longer than the block size it is hashed, as RFC 2104 says).
+/// in: st; key readable for keylen bytes, keylen >= 0 (32+ random bytes
+///   recommended; key may be 0 only when keylen == 0)
+/// returns: CR_OK; CR_E_ARG (null st, null key with keylen > 0,
+///   keylen < 0); CR_E_INIT; CR_E_INTERNAL if the linked libsodium's state
+///   is larger than this binding reserves
+/// owns: st stays the caller's; the key is copied into st's pads, so the
+///   caller may wipe its key right away
+/// thread: main thread only
+/// example: var st: CrHmacSha512State; cr_hmac_sha512_init(&st, &k[0], 32);
+export fn cr_hmac_sha512_init(st: CrHmacSha512State*, key: uint8*, keylen: int64) -> int32 {
+  if (st == 0 || keylen < 0 || (key == 0 && keylen > 0)) { return CR_E_ARG; }
+  if (cr_init() != CR_OK) { return CR_E_INIT; }
+  if (!cr_hmac512_state_fits()) { return CR_E_INTERNAL; }
+  var kp: uint8* = key;
+  if (keylen == 0) { kp = &g_cr_mac_empty[0]; }
+  if (crypto_auth_hmacsha512_init(cr_hmac_sha512_state_bytes(st), kp, (uint64)keylen) != 0) {
+    cr_wipe(cr_hmac_sha512_state_bytes(st), 512);
+    return CR_E_INTERNAL;
+  }
+  return CR_OK;
+}
+
+/// Feeds n more message bytes into an HMAC-SHA512 computation.
+/// in: st from cr_hmac_sha512_init; msg readable for n bytes; n >= 0
+/// returns: CR_OK; CR_E_ARG (null st, null msg with n > 0, n < 0)
+/// owns: nothing new
+/// thread: main thread only
+/// example: cr_hmac_sha512_update(&st, part.chars, (int64)part.length);
+export fn cr_hmac_sha512_update(st: CrHmacSha512State*, msg: uint8*, n: int64) -> int32 {
+  if (st == 0 || n < 0 || (msg == 0 && n > 0)) { return CR_E_ARG; }
+  if (n == 0) { return CR_OK; }
+  if (crypto_auth_hmacsha512_update(cr_hmac_sha512_state_bytes(st), msg, (uint64)n) != 0) { return CR_E_INTERNAL; }
+  return CR_OK;
+}
+
+/// Finishes an HMAC-SHA512 computation, writes the tag and wipes the state.
+/// in: st from cr_hmac_sha512_init; out
+/// returns: CR_OK; CR_E_ARG (null st or out)
+/// owns: st is wiped (start again with cr_hmac_sha512_init to reuse it)
+/// thread: main thread only
+/// example: var t: CrHmacSha512; cr_hmac_sha512_final(&st, &t);
+export fn cr_hmac_sha512_final(st: CrHmacSha512State*, out: CrHmacSha512*) -> int32 {
+  if (st == 0 || out == 0) { return CR_E_ARG; }
+  var rc: int32 = crypto_auth_hmacsha512_final(cr_hmac_sha512_state_bytes(st), &out->b[0]);
+  cr_wipe(cr_hmac_sha512_state_bytes(st), 512);
+  if (rc != 0) { return CR_E_INTERNAL; }
+  return CR_OK;
+}
+
+/// Computes HMAC-SHA512(key, msg) in one call (init + update + final), for a
+/// key of any length.
+/// in: out; key/keylen as cr_hmac_sha512_init; msg/n as cr_hmac_sha512_update
+/// returns: CR_OK; CR_E_ARG; CR_E_INIT; CR_E_INTERNAL. On error out is
+///   left zeroed
+/// owns: nothing; the temporary state is wiped
+/// thread: main thread only
+/// example: var t: CrHmacSha512; cr_hmac_sha512(&t, &k[0], 32, m.chars, (int64)m.length);
+export fn cr_hmac_sha512(out: CrHmacSha512*, key: uint8*, keylen: int64, msg: uint8*, n: int64) -> int32 {
+  if (out == 0) { return CR_E_ARG; }
+  cr_wipe(&out->b[0], 64);
+  var st: CrHmacSha512State;
+  var rc: int32 = cr_hmac_sha512_init(&st, key, keylen);
+  if (rc != CR_OK) { return rc; }
+  rc = cr_hmac_sha512_update(&st, msg, n);
+  if (rc != CR_OK) {
+    cr_wipe(cr_hmac_sha512_state_bytes(&st), 512);
+    return rc;
+  }
+  return cr_hmac_sha512_final(&st, out);
+}
+
+/// Checks an HMAC-SHA512 tag in constant time: recomputes the tag and compares
+/// with sodium_memcmp.
+/// in: tag, the received tag; key/keylen and msg/n as cr_hmac_sha512
+/// returns: true only if the tag is valid; false for a wrong tag and for
+///   every error (fails closed)
+/// owns: nothing; the recomputed tag is wiped
+/// thread: main thread only
+/// example: if (!cr_hmac_sha512_verify(&t, &k[0], 32, m.chars, (int64)m.length)) { reject(); }
+export fn cr_hmac_sha512_verify(tag: CrHmacSha512*, key: uint8*, keylen: int64, msg: uint8*, n: int64) -> bool {
+  if (tag == 0) { return false; }
+  var want: CrHmacSha512;
+  if (cr_hmac_sha512(&want, key, keylen, msg, n) != CR_OK) { return false; }
+  var ok: bool = cr_equal(&want.b[0], &tag->b[0], 64);
+  cr_wipe(&want.b[0], 64);
+  return ok;
+}

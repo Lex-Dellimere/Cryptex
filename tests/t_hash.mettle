@@ -1,0 +1,48 @@
+// SHA-256 / SHA-512: FIPS 180-2 "abc", "" and the 448-bit message.
+// BLAKE2b-512: RFC 7693 Appendix A "abc". Keyed/short BLAKE2b values were
+// cross-checked with Python hashlib (OpenSSL), independent of libsodium.
+import "crypto/crypto";
+import "tcheck";
+
+fn main() -> int32 {
+  var abc: string = "abc";
+  var empty: string = "";
+  var m448: string = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+  var d: CrSha256;
+  tc_rc("sha256 abc rc", cr_sha256(&d, abc.chars, 3), CR_OK);
+  tc_hex_eq("sha256 abc", &d.b[0], 32, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  tc_rc("sha256 empty rc", cr_sha256(&d, empty.chars, 0), CR_OK);
+  tc_hex_eq("sha256 empty", &d.b[0], 32, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  tc_rc("sha256 null+0 rc", cr_sha256(&d, 0, 0), CR_OK);
+  tc_hex_eq("sha256 null+0", &d.b[0], 32, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  tc_rc("sha256 448 rc", cr_sha256(&d, m448.chars, (int64)m448.length), CR_OK);
+  tc_hex_eq("sha256 448", &d.b[0], 32, "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+  tc_rc("sha256 null out", cr_sha256(0, abc.chars, 3), CR_E_ARG);
+  tc_rc("sha256 null msg", cr_sha256(&d, 0, 3), CR_E_ARG);
+  tc_rc("sha256 neg len", cr_sha256(&d, abc.chars, -1), CR_E_ARG);
+
+  var e: CrSha512;
+  tc_rc("sha512 abc rc", cr_sha512(&e, abc.chars, 3), CR_OK);
+  tc_hex_eq("sha512 abc", &e.b[0], 64, "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f");
+  tc_rc("sha512 empty rc", cr_sha512(&e, empty.chars, 0), CR_OK);
+  tc_hex_eq("sha512 empty", &e.b[0], 64, "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e");
+  tc_rc("sha512 448 rc", cr_sha512(&e, m448.chars, (int64)m448.length), CR_OK);
+  tc_hex_eq("sha512 448", &e.b[0], 64, "204a8fc6dda82f0a0ced7beb8e08a41657c16ef468b228a8279be331a703c33596fd15c13b1b07f9aa1d3bea57789ca031ad85c7a71dd70354ec631238ca3445");
+  tc_rc("sha512 neg len", cr_sha512(&e, abc.chars, -5), CR_E_ARG);
+
+  var o: uint8[64];
+  tc_rc("blake2b-512 abc rc", cr_blake2b(&o[0], 64, abc.chars, 3, 0, 0), CR_OK);
+  tc_hex_eq("blake2b-512 abc (RFC 7693 A)", &o[0], 64, "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d17d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923");
+  tc_rc("blake2b-256 empty rc", cr_blake2b(&o[0], 32, 0, 0, 0, 0), CR_OK);
+  tc_hex_eq("blake2b-256 empty", &o[0], 32, "0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8");
+  var key: uint8[32];
+  for i in 0..32 { key[i] = (uint8)i; }
+  tc_rc("blake2b-256 keyed rc", cr_blake2b(&o[0], 32, abc.chars, 3, &key[0], 32), CR_OK);
+  tc_hex_eq("blake2b-256 keyed", &o[0], 32, "d63a32d3e44738d7907f964316c241adaba0abfeabc32349677578a15a203f7f");
+  tc_rc("blake2b outlen 15", cr_blake2b(&o[0], 15, abc.chars, 3, 0, 0), CR_E_ARG);
+  tc_rc("blake2b outlen 65", cr_blake2b(&o[0], 65, abc.chars, 3, 0, 0), CR_E_ARG);
+  tc_rc("blake2b keylen 8", cr_blake2b(&o[0], 32, abc.chars, 3, &key[0], 8), CR_E_ARG);
+  tc_rc("blake2b keylen 65", cr_blake2b(&o[0], 32, abc.chars, 3, &key[0], 65), CR_E_ARG);
+  tc_rc("blake2b null key", cr_blake2b(&o[0], 32, abc.chars, 3, 0, 32), CR_E_ARG);
+  return tc_finish("hash");
+}

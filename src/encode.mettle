@@ -1,0 +1,166 @@
+// Encodings for tokens and keys: lowercase hex and base64url without padding
+// (RFC 4648 section 5). Backend: libsodium sodium_bin2hex / sodium_hex2bin /
+// sodium_bin2base64 / sodium_base642bin (constant-time implementations,
+// so encoding secrets does not leak them through timing).
+//
+// Decoding is strict: no whitespace or other ignored characters, the whole
+// input must be consumed, hex must have an even number of digits, base64url
+// must have no '=' padding, no length of the form 4k+1, and zero trailing
+// bits. Anything else is CR_E_DECODE.
+//
+// Encoders write a terminating nul after the text (so the output can go
+// straight to C), which is why the capacity needs one extra byte; the
+// reported length excludes it.
+
+import "status";
+import "core";
+
+extern fn sodium_bin2hex(hex: uint8*, hex_maxlen: uint64, bin: uint8*, bin_len: uint64) -> uint8* = "sodium_bin2hex";
+extern fn sodium_hex2bin(bin: uint8*, bin_maxlen: uint64, hex: uint8*, hex_len: uint64, ignore: uint8*, bin_len: uint64*, hex_end: uint8**) -> int32 = "sodium_hex2bin";
+extern fn sodium_bin2base64(b64: uint8*, b64_maxlen: uint64, bin: uint8*, bin_len: uint64, variant: int32) -> uint8* = "sodium_bin2base64";
+extern fn sodium_base642bin(bin: uint8*, bin_maxlen: uint64, b64: uint8*, b64_len: uint64, ignore: uint8*, bin_len: uint64*, b64_end: uint8**, variant: int32) -> int32 = "sodium_base642bin";
+extern fn sodium_base64_encoded_len(bin_len: uint64, variant: int32) -> uint64 = "sodium_base64_encoded_len";
+
+// sodium_base64_VARIANT_URLSAFE_NO_PADDING
+const CR_B64_URL_NOPAD: int32 = 7;
+// Inputs above this are refused, so no size computation can overflow.
+const CR_ENC_MAX: int64 = 1152921504606846975;
+
+var g_cr_enc_empty: uint8[1];
+
+/// Capacity cr_hex_encode needs for n input bytes: 2n + 1 (the nul).
+/// in: n >= 0
+/// returns: 2n + 1, or -1 for a negative or absurdly large n
+/// owns: nothing
+/// thread: any thread (pure)
+/// example: var cap: int64 = cr_hex_encoded_cap(32);  // 65
+export fn cr_hex_encoded_cap(n: int64) -> int64 {
+  if (n < 0 || n > CR_ENC_MAX) { return -1; }
+  return n * 2 + 1;
+}
+
+/// Capacity cr_base64url_encode needs for n input bytes, nul included
+/// (sodium_base64_encoded_len with the URL-safe no-padding variant).
+/// in: n >= 0
+/// returns: the capacity, or -1 for a negative or absurdly large n
+/// owns: nothing
+/// thread: main thread only (calls libsodium)
+/// example: var cap: int64 = cr_base64url_encoded_cap(32);  // 44
+export fn cr_base64url_encoded_cap(n: int64) -> int64 {
+  if (n < 0 || n > CR_ENC_MAX) { return -1; }
+  return (int64)sodium_base64_encoded_len((uint64)n, CR_B64_URL_NOPAD);
+}
+
+/// Encodes n bytes as lowercase hex.
+/// in: out writable for out_cap >= cr_hex_encoded_cap(n) bytes; out_len;
+///   bin/n
+/// returns: CR_OK and *out_len = 2n (text followed by a nul); CR_E_ARG;
+///   CR_E_SPACE if out_cap is too small (nothing written); CR_E_INIT. On
+///   error *out_len = 0
+/// owns: nothing; the caller owns out
+/// thread: main thread only
+/// example: var hx: uint8[65]; var hl: int64; cr_hex_encode(&hx[0], 65, &hl, &d.b[0], 32);
+export fn cr_hex_encode(out: uint8*, out_cap: int64, out_len: int64*, bin: uint8*, n: int64) -> int32 {
+  if (out_len == 0) { return CR_E_ARG; }
+  *out_len = 0;
+  if (out == 0 || n < 0 || n > CR_ENC_MAX || (bin == 0 && n > 0)) { return CR_E_ARG; }
+  if (out_cap < cr_hex_encoded_cap(n)) { return CR_E_SPACE; }
+  if (cr_init() != CR_OK) { return CR_E_INIT; }
+  var bp: uint8* = bin;
+  if (n == 0) { bp = &g_cr_enc_empty[0]; }
+  sodium_bin2hex(out, (uint64)out_cap, bp, (uint64)n);
+  *out_len = n * 2;
+  return CR_OK;
+}
+
+/// Decodes hex (either case) strictly.
+/// in: out writable for out_cap bytes; out_len; text/n, the hex digits
+///   (no nul needed)
+/// returns: CR_OK and *out_len = n / 2; CR_E_DECODE for an odd length or
+///   any non-hex character (including spaces and a trailing nul);
+///   CR_E_SPACE if out_cap < n / 2; CR_E_ARG; CR_E_INIT. On error
+///   *out_len = 0 and out's first out_cap bytes are wiped
+/// owns: nothing; the caller owns out
+/// thread: main thread only
+/// example: var k: uint8[32]; var kl: int64; cr_hex_decode(&k[0], 32, &kl, s.chars, (int64)s.length);
+export fn cr_hex_decode(out: uint8*, out_cap: int64, out_len: int64*, text: uint8*, n: int64) -> int32 {
+  if (out_len == 0) { return CR_E_ARG; }
+  *out_len = 0;
+  if (out == 0 || out_cap < 0 || n < 0 || n > CR_ENC_MAX || (text == 0 && n > 0)) { return CR_E_ARG; }
+  if (n % 2 != 0) {
+    cr_wipe(out, out_cap);
+    return CR_E_DECODE;
+  }
+  if (out_cap < n / 2) {
+    cr_wipe(out, out_cap);
+    return CR_E_SPACE;
+  }
+  if (n == 0) { return CR_OK; }
+  if (cr_init() != CR_OK) { return CR_E_INIT; }
+  var got: uint64 = 0;
+  var rc: int32 = sodium_hex2bin(out, (uint64)out_cap, text, (uint64)n, 0, &got, 0);
+  if (rc != 0 || got != (uint64)(n / 2)) {
+    cr_wipe(out, out_cap);
+    return CR_E_DECODE;
+  }
+  *out_len = (int64)got;
+  return CR_OK;
+}
+
+/// Encodes n bytes as base64url without padding (alphabet A-Z a-z 0-9 - _),
+/// the form used in URLs, cookies and tokens.
+/// in: out writable for out_cap >= cr_base64url_encoded_cap(n) bytes;
+///   out_len; bin/n
+/// returns: CR_OK and *out_len = the text length (a nul follows it);
+///   CR_E_ARG; CR_E_SPACE if out_cap is too small (nothing written);
+///   CR_E_INIT. On error *out_len = 0
+/// owns: nothing; the caller owns out
+/// thread: main thread only
+/// example: var t: uint8[44]; var tl: int64; cr_base64url_encode(&t[0], 44, &tl, &raw[0], 32);
+export fn cr_base64url_encode(out: uint8*, out_cap: int64, out_len: int64*, bin: uint8*, n: int64) -> int32 {
+  if (out_len == 0) { return CR_E_ARG; }
+  *out_len = 0;
+  if (out == 0 || n < 0 || n > CR_ENC_MAX || (bin == 0 && n > 0)) { return CR_E_ARG; }
+  var need: int64 = cr_base64url_encoded_cap(n);
+  if (out_cap < need) { return CR_E_SPACE; }
+  if (cr_init() != CR_OK) { return CR_E_INIT; }
+  var bp: uint8* = bin;
+  if (n == 0) { bp = &g_cr_enc_empty[0]; }
+  sodium_bin2base64(out, (uint64)out_cap, bp, (uint64)n, CR_B64_URL_NOPAD);
+  *out_len = need - 1;
+  return CR_OK;
+}
+
+/// Decodes unpadded base64url strictly.
+/// in: out writable for out_cap bytes; out_len; text/n (no nul needed)
+/// returns: CR_OK and *out_len = the decoded length; CR_E_DECODE for any
+///   character outside the base64url alphabet (including '=', '+', '/',
+///   spaces), a length of the form 4k+1, or non-zero trailing bits;
+///   CR_E_SPACE if out_cap < floor(3n / 4); CR_E_ARG; CR_E_INIT. On error
+///   *out_len = 0 and out's first out_cap bytes are wiped
+/// owns: nothing; the caller owns out
+/// thread: main thread only
+/// example: var raw: uint8[32]; var rl: int64; cr_base64url_decode(&raw[0], 32, &rl, t.chars, (int64)t.length);
+export fn cr_base64url_decode(out: uint8*, out_cap: int64, out_len: int64*, text: uint8*, n: int64) -> int32 {
+  if (out_len == 0) { return CR_E_ARG; }
+  *out_len = 0;
+  if (out == 0 || out_cap < 0 || n < 0 || n > CR_ENC_MAX || (text == 0 && n > 0)) { return CR_E_ARG; }
+  if (n % 4 == 1) {
+    cr_wipe(out, out_cap);
+    return CR_E_DECODE;
+  }
+  if (out_cap < (n / 4) * 3 + ((n % 4) * 3) / 4) {
+    cr_wipe(out, out_cap);
+    return CR_E_SPACE;
+  }
+  if (n == 0) { return CR_OK; }
+  if (cr_init() != CR_OK) { return CR_E_INIT; }
+  var got: uint64 = 0;
+  var rc: int32 = sodium_base642bin(out, (uint64)out_cap, text, (uint64)n, 0, &got, 0, CR_B64_URL_NOPAD);
+  if (rc != 0) {
+    cr_wipe(out, out_cap);
+    return CR_E_DECODE;
+  }
+  *out_len = (int64)got;
+  return CR_OK;
+}

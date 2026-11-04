@@ -1,0 +1,3 @@
+import "crypto/crypto";
+import "tcheck";
+fn main() -> int32 { return tc_finish("mac"); }

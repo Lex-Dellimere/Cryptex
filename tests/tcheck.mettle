@@ -1,0 +1,104 @@
+// Shared checks for the crypto test programs. Hex here is a plain Mettle
+// loop, so vector checks do not depend on the library's own encoder.
+
+import "std/io";
+import "std/mem";
+import "std/conv";
+
+var g_tc_checks: int32 = 0;
+var g_tc_fails: int32 = 0;
+
+fn tc_nib(v: int32) -> uint8 {
+  if (v < 10) { return (uint8)(48 + v); }
+  return (uint8)(87 + v);
+}
+
+fn tc_val(c: uint8) -> int32 {
+  if (c >= 48 && c <= 57) { return (int32)c - 48; }
+  if (c >= 97 && c <= 102) { return (int32)c - 87; }
+  return -1;
+}
+
+// Lowercase hex of n bytes; the caller frees .chars.
+export fn tc_hex(p: uint8*, n: int64) -> string {
+  var buf: uint8* = (uint8*)malloc(n * 2 + 1);
+  var i: int64 = 0;
+  while (i < n) {
+    buf[i * 2] = tc_nib((int32)(p[i] >> 4));
+    buf[i * 2 + 1] = tc_nib((int32)(p[i] & 15));
+    i = i + 1;
+  }
+  buf[n * 2] = 0;
+  return str_from_bytes((cstring)buf, n * 2);
+}
+
+// Decodes lowercase hex into out (cap bytes); returns the length or -1.
+export fn tc_unhex(h: string, out: uint8*, cap: int64) -> int64 {
+  var n: int64 = (int64)h.length / 2;
+  if (n > cap) { return -1; }
+  var i: int64 = 0;
+  while (i < n) {
+    var a: int32 = tc_val(h.chars[i * 2]);
+    var b: int32 = tc_val(h.chars[i * 2 + 1]);
+    if (a < 0 || b < 0) { return -1; }
+    out[i] = (uint8)(a * 16 + b);
+    i = i + 1;
+  }
+  return n;
+}
+
+export fn tc_ok(name: string, cond: bool) {
+  g_tc_checks = g_tc_checks + 1;
+  if (!cond) {
+    g_tc_fails = g_tc_fails + 1;
+    println("FAIL " + name);
+  }
+}
+
+export fn tc_rc(name: string, got: int32, want: int32) {
+  g_tc_checks = g_tc_checks + 1;
+  if (got != want) {
+    g_tc_fails = g_tc_fails + 1;
+    println("FAIL " + name + ": status {got}, want {want}");
+  }
+}
+
+export fn tc_hex_eq(name: string, p: uint8*, n: int64, want: string) {
+  g_tc_checks = g_tc_checks + 1;
+  var got: string = tc_hex(p, n);
+  if (got != want) {
+    g_tc_fails = g_tc_fails + 1;
+    println("FAIL " + name);
+    println("  got  " + got);
+    println("  want " + want);
+  }
+  free(got.chars);
+}
+
+// Fills n bytes with value v.
+export fn tc_fill(p: uint8*, n: int64, v: int32) {
+  var i: int64 = 0;
+  while (i < n) {
+    p[i] = (uint8)v;
+    i = i + 1;
+  }
+}
+
+export fn tc_all_zero(p: uint8*, n: int64) -> bool {
+  var i: int64 = 0;
+  while (i < n) {
+    if (p[i] != 0) { return false; }
+    i = i + 1;
+  }
+  return true;
+}
+
+// Prints the suite's one result line; returns the exit code.
+export fn tc_finish(suite: string) -> int32 {
+  if (g_tc_fails == 0) {
+    println("OK " + suite + " ({g_tc_checks} checks)");
+    return 0;
+  }
+  println("FAILED " + suite + " ({g_tc_fails} of {g_tc_checks} checks)");
+  return 1;
+}

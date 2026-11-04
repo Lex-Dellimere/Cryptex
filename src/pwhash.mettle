@@ -1,0 +1,207 @@
+// Password hashing: Argon2id (RFC 9106) through libsodium's
+// crypto_pwhash_str_alg / crypto_pwhash_str_verify /
+// crypto_pwhash_argon2id_str_needs_rehash.
+//
+// The output is libsodium's self-describing string
+//   $argon2id$v=19$m=65536,t=2,p=1$<salt b64>$<hash b64>
+// It carries the algorithm, costs and a fresh random 16-byte salt, so store
+// it as is (it fits in 127 bytes) and nothing else.
+
+import "std/conv";
+import "status";
+import "types";
+import "core";
+
+extern fn crypto_pwhash_str_alg(out: uint8*, passwd: uint8*, passwdlen: uint64, opslimit: uint64, memlimit: uint64, alg: int32) -> int32 = "crypto_pwhash_str_alg";
+extern fn crypto_pwhash_str_verify(str: uint8*, passwd: uint8*, passwdlen: uint64) -> int32 = "crypto_pwhash_str_verify";
+extern fn crypto_pwhash_argon2id_str_needs_rehash(str: uint8*, opslimit: uint64, memlimit: uint64) -> int32 = "crypto_pwhash_argon2id_str_needs_rehash";
+extern fn crypto_pwhash_alg_argon2id13() -> int32 = "crypto_pwhash_alg_argon2id13";
+extern fn crypto_pwhash_argon2id_opslimit_interactive() -> uint64 = "crypto_pwhash_argon2id_opslimit_interactive";
+extern fn crypto_pwhash_argon2id_memlimit_interactive() -> uint64 = "crypto_pwhash_argon2id_memlimit_interactive";
+extern fn crypto_pwhash_argon2id_opslimit_moderate() -> uint64 = "crypto_pwhash_argon2id_opslimit_moderate";
+extern fn crypto_pwhash_argon2id_memlimit_moderate() -> uint64 = "crypto_pwhash_argon2id_memlimit_moderate";
+extern fn crypto_pwhash_argon2id_opslimit_sensitive() -> uint64 = "crypto_pwhash_argon2id_opslimit_sensitive";
+extern fn crypto_pwhash_argon2id_memlimit_sensitive() -> uint64 = "crypto_pwhash_argon2id_memlimit_sensitive";
+
+/// Preset for online logins: Argon2id t=2 (opslimit), m=64 MiB
+/// (crypto_pwhash_argon2id_*_INTERACTIVE). About 0.1 s and 64 MiB of RAM
+/// per hash on a desktop core; the right default for web logins.
+/// in: -
+/// returns: 1
+/// owns: nothing
+/// thread: constant
+/// example: cr_pwhash_str(&h, pw.chars, (int64)pw.length, CR_PW_INTERACTIVE);
+export const CR_PW_INTERACTIVE: int32 = 1;
+/// Preset with a higher margin: Argon2id t=3, m=256 MiB
+/// (*_MODERATE). Roughly 0.5-0.7 s per hash.
+/// in: -
+/// returns: 2
+/// owns: nothing
+/// thread: constant
+/// example: cr_pwhash_str(&h, pw.chars, (int64)pw.length, CR_PW_MODERATE);
+export const CR_PW_MODERATE: int32 = 2;
+/// Preset for rarely used, high-value secrets (key files, vault unlock):
+/// Argon2id t=4, m=1 GiB (*_SENSITIVE). Several seconds and 1 GiB of RAM per
+/// hash; never use it on a server that hashes on request.
+/// in: -
+/// returns: 3
+/// owns: nothing
+/// thread: constant
+/// example: cr_pwhash_str(&h, pw.chars, (int64)pw.length, CR_PW_SENSITIVE);
+export const CR_PW_SENSITIVE: int32 = 3;
+
+/// Reads the Argon2id costs of a preset, as the linked libsodium defines them.
+/// in: preset, one of CR_PW_*; ops and mem, where the costs go
+/// returns: CR_OK; CR_E_ARG for an unknown preset or a null out-param
+/// owns: nothing
+/// thread: main thread only
+/// example: var t: uint64; var m: uint64; cr_pwhash_preset_limits(CR_PW_MODERATE, &t, &m);
+export fn cr_pwhash_preset_limits(preset: int32, ops: uint64*, mem: uint64*) -> int32 {
+  if (ops == 0 || mem == 0) { return CR_E_ARG; }
+  if (preset == CR_PW_INTERACTIVE) {
+    *ops = crypto_pwhash_argon2id_opslimit_interactive();
+    *mem = crypto_pwhash_argon2id_memlimit_interactive();
+    return CR_OK;
+  }
+  if (preset == CR_PW_MODERATE) {
+    *ops = crypto_pwhash_argon2id_opslimit_moderate();
+    *mem = crypto_pwhash_argon2id_memlimit_moderate();
+    return CR_OK;
+  }
+  if (preset == CR_PW_SENSITIVE) {
+    *ops = crypto_pwhash_argon2id_opslimit_sensitive();
+    *mem = crypto_pwhash_argon2id_memlimit_sensitive();
+    return CR_OK;
+  }
+  return CR_E_ARG;
+}
+
+var g_cr_pw_empty: uint8[1];
+
+/// Hashes a password with Argon2id and a fresh random salt.
+/// in: out; pw readable for n bytes (any bytes; 0 allowed when n == 0),
+///   n >= 0; preset, one of CR_PW_INTERACTIVE / MODERATE / SENSITIVE
+/// returns: CR_OK; CR_E_ARG (null out, null pw with n > 0, n < 0, unknown
+///   preset); CR_E_INIT; CR_E_INTERNAL if Argon2id could not allocate its
+///   memory. On error out is all zeros
+/// owns: nothing; libsodium's working memory is allocated and freed inside
+///   the call by libc (never by Mettle's allocator). The caller should wipe
+///   the plaintext password after the call
+/// thread: main thread only. Blocks for the preset's time
+/// example: var h: CrPwHash; if (cr_pwhash_str(&h, pw.chars, (int64)pw.length, CR_PW_INTERACTIVE) == CR_OK) { store(cr_pwhash_text(&h)); }
+export fn cr_pwhash_str(out: CrPwHash*, pw: uint8*, n: int64, preset: int32) -> int32 {
+  if (out == 0) { return CR_E_ARG; }
+  cr_wipe(&out->b[0], 128);
+  if (n < 0 || (pw == 0 && n > 0)) { return CR_E_ARG; }
+  var ops: uint64 = 0;
+  var mem: uint64 = 0;
+  if (cr_pwhash_preset_limits(preset, &ops, &mem) != CR_OK) { return CR_E_ARG; }
+  if (cr_init() != CR_OK) { return CR_E_INIT; }
+  var p: uint8* = pw;
+  if (n == 0) { p = &g_cr_pw_empty[0]; }
+  if (crypto_pwhash_str_alg(&out->b[0], p, (uint64)n, ops, mem, crypto_pwhash_alg_argon2id13()) != 0) {
+    cr_wipe(&out->b[0], 128);
+    return CR_E_INTERNAL;
+  }
+  return CR_OK;
+}
+
+// A CrPwHash is usable only if it is nul-terminated inside its 128 bytes.
+fn cr_pw_terminated(h: CrPwHash*) -> bool {
+  var i: int32 = 0;
+  while (i < 128) {
+    if (h->b[i] == 0) { return i > 0; }
+    i = i + 1;
+  }
+  return false;
+}
+
+/// Checks a password against a stored hash (constant time inside libsodium).
+/// Accepts any Argon2 string libsodium understands (argon2id, legacy
+/// argon2i); use cr_pwhash_needs_rehash afterwards to upgrade.
+/// in: h, a hash from cr_pwhash_str or cr_pwhash_from_text; pw/n the
+///   candidate password
+/// returns: true only if the password matches; false for a wrong password,
+///   a malformed or unterminated hash, any argument error, or an
+///   allocation failure inside Argon2id (fails closed)
+/// owns: nothing
+/// thread: main thread only. Takes as long as the hash's own costs
+/// example: if (cr_pwhash_verify(&h, pw.chars, (int64)pw.length)) { login(); }
+export fn cr_pwhash_verify(h: CrPwHash*, pw: uint8*, n: int64) -> bool {
+  if (h == 0 || n < 0 || (pw == 0 && n > 0)) { return false; }
+  if (!cr_pw_terminated(h)) { return false; }
+  if (cr_init() != CR_OK) { return false; }
+  var p: uint8* = pw;
+  if (n == 0) { p = &g_cr_pw_empty[0]; }
+  var rc: int32 = crypto_pwhash_str_verify(&h->b[0], p, (uint64)n);
+  return rc == 0;
+}
+
+/// Tells whether a stored hash should be replaced: it is not Argon2id, or its
+/// costs differ from the preset. Call it after a successful
+/// cr_pwhash_verify and, when true, store cr_pwhash_str of the same password.
+/// in: h; preset, one of CR_PW_*
+/// returns: false only if h is a well-formed Argon2id string with exactly
+///   the preset's costs; true otherwise (including malformed hashes and
+///   argument errors, so a caller that rehashes is never left on old costs)
+/// owns: nothing
+/// thread: main thread only
+/// example: if (cr_pwhash_needs_rehash(&h, CR_PW_INTERACTIVE)) { rehash(); }
+export fn cr_pwhash_needs_rehash(h: CrPwHash*, preset: int32) -> bool {
+  if (h == 0 || !cr_pw_terminated(h)) { return true; }
+  var ops: uint64 = 0;
+  var mem: uint64 = 0;
+  if (cr_pwhash_preset_limits(preset, &ops, &mem) != CR_OK) { return true; }
+  if (cr_init() != CR_OK) { return true; }
+  var rc: int32 = crypto_pwhash_argon2id_str_needs_rehash(&h->b[0], ops, mem);
+  return rc != 0;
+}
+
+/// Views a hash as text for storage (without the terminating nul).
+/// in: h
+/// returns: a string view of h's bytes up to the nul; empty if h is 0 or
+///   unterminated
+/// owns: the view borrows h (caller memory, never libsodium's); copy it
+///   before h goes away
+/// thread: main thread only
+/// example: db_put(user, cr_pwhash_text(&h));
+export fn cr_pwhash_text(h: CrPwHash*) -> string {
+  if (h == 0 || !cr_pw_terminated(h)) { return str_from_bytes((cstring)0, 0); }
+  var n: int64 = 0;
+  while (h->b[n] != 0) { n = n + 1; }
+  return str_from_bytes((cstring)&h->b[0], n);
+}
+
+/// Loads a stored hash string into a CrPwHash. Only the shape is checked
+/// here (length 1..127, no nul bytes, "$argon2" prefix); libsodium parses
+/// the rest when verifying.
+/// in: out; text, the string cr_pwhash_text gave you
+/// returns: CR_OK; CR_E_ARG (null out); CR_E_DECODE if text cannot be a
+///   libsodium Argon2 string. On error out is all zeros
+/// owns: text is copied; the caller keeps ownership of it
+/// thread: main thread only
+/// example: var h: CrPwHash; if (cr_pwhash_from_text(&h, row.hash) == CR_OK) { ... }
+export fn cr_pwhash_from_text(out: CrPwHash*, text: string) -> int32 {
+  if (out == 0) { return CR_E_ARG; }
+  cr_wipe(&out->b[0], 128);
+  var n: int64 = (int64)text.length;
+  if (n < 8 || n > 127) { return CR_E_DECODE; }
+  var prefix: string = "$argon2";
+  var i: int64 = 0;
+  while (i < 7) {
+    if (text.chars[i] != prefix.chars[i]) { return CR_E_DECODE; }
+    i = i + 1;
+  }
+  i = 0;
+  while (i < n) {
+    var c: uint8 = text.chars[i];
+    if (c == 0) {
+      cr_wipe(&out->b[0], 128);
+      return CR_E_DECODE;
+    }
+    out->b[i] = c;
+    i = i + 1;
+  }
+  out->b[n] = 0;
+  return CR_OK;
+}
