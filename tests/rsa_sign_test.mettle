@@ -1,0 +1,422 @@
+// RSA signing (RFC 8017): RSASSA-PKCS1-v1_5 and RSASSA-PSS.
+// Rows of tests/vectors/vec_rsa_sign: NIST CAVP SigGen15 keys and signatures,
+// and PSS signatures made with a fixed salt, all checked with OpenSSL.
+//
+// Row format, hex fields joined by '|':
+//   kind (pkcs1 or pss) | hash (256, 384, 512) | n | e | p | q | dp | dq |
+//   qinv | message | salt | signature
+//
+// PKCS#1 v1.5 rows: the signature equals the vector exactly and verifies. PSS
+// rows: the signature with the row's salt equals the vector exactly; with a
+// random salt it verifies, and two calls differ. Then: a damaged key part
+// makes the fault check fire (CR_E_INTERNAL, output wiped), argument errors,
+// CR_E_SPACE, an unknown hash, and the release time of one signature at 2048
+// and 3072 bits.
+import "crypto/rsa/rsa";
+import "crypto/hash/hash";
+import "crypto/core/status";
+import "crypto/core/util";
+import "tcheck";
+import "std/bench";
+import "vectors/vec_rsa_sign";
+
+struct SignCase {
+  pss: bool;
+  hash: int32;
+  n: uint8[520];
+  nl: int64;
+  e: uint8[16];
+  el: int64;
+  p: uint8[264];
+  pl: int64;
+  q: uint8[264];
+  ql: int64;
+  dp: uint8[264];
+  dpl: int64;
+  dq: uint8[264];
+  dql: int64;
+  qi: uint8[264];
+  qil: int64;
+  msg: uint8[256];
+  ml: int64;
+  salt: uint8[64];
+  sal: int64;
+  sig: uint8[520];
+  sl: int64;
+}
+
+var g_first_pkcs1_2048: string = "";
+var g_first_pkcs1_3072: string = "";
+var g_first_pss_2048: string = "";
+var g_first_pss_3072: string = "";
+var g_rows_pkcs1: int32 = 0;
+var g_rows_pss: int32 = 0;
+
+fn hash_id(s: string) -> int32 {
+  if (s == "256") { return CR_HASH_SHA256; }
+  if (s == "384") { return CR_HASH_SHA384; }
+  if (s == "512") { return CR_HASH_SHA512; }
+  return 0;
+}
+
+fn load(c: SignCase*, row: string) -> bool {
+  var kind: string = tc_field(row, 0);
+  c->pss = kind == "pss";
+  c->hash = hash_id(tc_field(row, 1));
+  c->nl = tc_unhex(tc_field(row, 2), &c->n[0], 520);
+  c->el = tc_unhex(tc_field(row, 3), &c->e[0], 16);
+  c->pl = tc_unhex(tc_field(row, 4), &c->p[0], 264);
+  c->ql = tc_unhex(tc_field(row, 5), &c->q[0], 264);
+  c->dpl = tc_unhex(tc_field(row, 6), &c->dp[0], 264);
+  c->dql = tc_unhex(tc_field(row, 7), &c->dq[0], 264);
+  c->qil = tc_unhex(tc_field(row, 8), &c->qi[0], 264);
+  c->ml = tc_unhex(tc_field(row, 9), &c->msg[0], 256);
+  c->sal = tc_unhex(tc_field(row, 10), &c->salt[0], 64);
+  c->sl = tc_unhex(tc_field(row, 11), &c->sig[0], 520);
+  var ok: bool = kind == "pss" || kind == "pkcs1";
+  return ok && c->hash != 0 && c->nl > 0 && c->el > 0 && c->pl > 0 && c->ql > 0 && c->dpl > 0 && c->dql > 0 && c->qil > 0 && c->ml >= 0 && c->sal >= 0 && c->sl == c->nl;
+}
+
+fn key_of(c: SignCase*, k: CrRsaPrivate*) {
+  k->n = &c->n[0];
+  k->n_len = c->nl;
+  k->e = &c->e[0];
+  k->e_len = c->el;
+  k->p = &c->p[0];
+  k->p_len = c->pl;
+  k->q = &c->q[0];
+  k->q_len = c->ql;
+  k->dp = &c->dp[0];
+  k->dp_len = c->dpl;
+  k->dq = &c->dq[0];
+  k->dq_len = c->dql;
+  k->qinv = &c->qi[0];
+  k->qinv_len = c->qil;
+}
+
+fn sign_det(c: SignCase*, out: uint8*, cap: int64, out_len: int64*) -> int32 {
+  var k: CrRsaPrivate;
+  key_of(c, &k);
+  if (c->pss) {
+    return crx_rsa_sign_pss_salt(out, cap, out_len, &c->msg[0], c->ml, c->hash, &c->salt[0], c->sal, &k);
+  }
+  return cr_rsa_sign_pkcs1(out, cap, out_len, &c->msg[0], c->ml, c->hash, &k);
+}
+
+fn verify(c: SignCase*, sig: uint8*, sl: int64) -> bool {
+  if (c->pss) {
+    return cr_rsa_verify_pss(sig, sl, &c->msg[0], c->ml, c->hash, &c->n[0], c->nl, &c->e[0], c->el);
+  }
+  return cr_rsa_verify_pkcs1(sig, sl, &c->msg[0], c->ml, c->hash, &c->n[0], c->nl, &c->e[0], c->el);
+}
+
+fn check_row(label: string, row: string) {
+  var c: SignCase;
+  tc_ok(label + " fields", load(&c, row));
+  var out: uint8[520];
+  var ol: int64 = 0;
+  tc_rc(label + " status", sign_det(&c, &out[0], 520, &ol), CR_OK);
+  tc_ok(label + " length", ol == c.sl);
+  tc_ok(label + " equals vector", ol == c.sl && cr_equal(&out[0], &c.sig[0], c.sl));
+  tc_ok(label + " verifies", verify(&c, &out[0], ol));
+  if (c.pss) {
+    g_rows_pss = g_rows_pss + 1;
+    var k: CrRsaPrivate;
+    key_of(&c, &k);
+    var s1: uint8[520];
+    var s2: uint8[520];
+    var l1: int64 = 0;
+    var l2: int64 = 0;
+    tc_rc(label + " random status 1", cr_rsa_sign_pss(&s1[0], 520, &l1, &c.msg[0], c.ml, c.hash, &k), CR_OK);
+    tc_rc(label + " random status 2", cr_rsa_sign_pss(&s2[0], 520, &l2, &c.msg[0], c.ml, c.hash, &k), CR_OK);
+    tc_ok(label + " random length", l1 == c.nl && l2 == c.nl);
+    tc_ok(label + " random verifies 1", verify(&c, &s1[0], l1));
+    tc_ok(label + " random verifies 2", verify(&c, &s2[0], l2));
+    tc_ok(label + " random signatures differ", !cr_equal(&s1[0], &s2[0], c.nl));
+    tc_ok(label + " random differs from fixed salt", !cr_equal(&s1[0], &c.sig[0], c.nl));
+  } else {
+    g_rows_pkcs1 = g_rows_pkcs1 + 1;
+  }
+}
+
+fn rows() {
+  for r in 0..VEC_RSA_SIGN_N {
+    var row: string = VEC_RSA_SIGN[r];
+    check_row("row {r}", row);
+    var kind: string = tc_field(row, 0);
+    var nbytes: int64 = (int64)tc_field(row, 2).length / 2;
+    if (kind == "pkcs1" && nbytes == 256 && g_first_pkcs1_2048.length == 0) { g_first_pkcs1_2048 = row; }
+    if (kind == "pkcs1" && nbytes == 384 && g_first_pkcs1_3072.length == 0) { g_first_pkcs1_3072 = row; }
+    if (kind == "pss" && nbytes == 256 && g_first_pss_2048.length == 0) { g_first_pss_2048 = row; }
+    if (kind == "pss" && nbytes == 384 && g_first_pss_3072.length == 0) { g_first_pss_3072 = row; }
+  }
+}
+
+fn all_zero(p: uint8*, n: int64) -> bool {
+  return cr_is_zero(p, n);
+}
+
+fn fault(label: string, row: string, which: int32) {
+  var c: SignCase;
+  tc_ok(label + " fields", load(&c, row));
+  var k: CrRsaPrivate;
+  key_of(&c, &k);
+  if (which == 0) { c.dp[c.dpl - 1] = c.dp[c.dpl - 1] ^ 1; }
+  if (which == 1) { c.dq[c.dql - 1] = c.dq[c.dql - 1] ^ 4; }
+  if (which == 2) { c.qi[c.qil / 2] = c.qi[c.qil / 2] ^ 0x80; }
+  var out: uint8[520];
+  for i in 0..520 { out[i] = 0xA5; }
+  var ol: int64 = 77;
+  var st: int32;
+  if (c.pss) {
+    st = crx_rsa_sign_pss_salt(&out[0], 520, &ol, &c.msg[0], c.ml, c.hash, &c.salt[0], c.sal, &k);
+  } else {
+    st = cr_rsa_sign_pkcs1(&out[0], 520, &ol, &c.msg[0], c.ml, c.hash, &k);
+  }
+  tc_rc(label + " status", st, CR_E_INTERNAL);
+  tc_ok(label + " output wiped", all_zero(&out[0], c.nl));
+  tc_ok(label + " length zero", ol == 0);
+  tc_ok(label + " bytes after the signature untouched", out[c.nl] == 0xA5);
+  if (c.pss) {
+    var s: uint8[520];
+    for i in 0..520 { s[i] = 0xA5; }
+    var l: int64 = 77;
+    tc_rc(label + " random salt status", cr_rsa_sign_pss(&s[0], 520, &l, &c.msg[0], c.ml, c.hash, &k), CR_E_INTERNAL);
+    tc_ok(label + " random salt output wiped", all_zero(&s[0], c.nl) && l == 0);
+  }
+}
+
+fn sample(i: int32) -> string {
+  if (i == 0) { return g_first_pkcs1_2048; }
+  if (i == 1) { return g_first_pkcs1_3072; }
+  if (i == 2) { return g_first_pss_2048; }
+  return g_first_pss_3072;
+}
+
+fn sample_name(i: int32) -> string {
+  if (i == 0) { return "pkcs1 2048"; }
+  if (i == 1) { return "pkcs1 3072"; }
+  if (i == 2) { return "pss 2048"; }
+  return "pss 3072";
+}
+
+fn faults() {
+  for i in 0..4 {
+    for w in 0..3 {
+      var part: string = "dp";
+      if (w == 1) { part = "dq"; }
+      if (w == 2) { part = "qinv"; }
+      fault("fault " + sample_name((int32)i) + " " + part, sample((int32)i), (int32)w);
+    }
+  }
+}
+
+fn sign_any(c: SignCase*, k: CrRsaPrivate*, out: uint8*, cap: int64, ol: int64*, pss: bool) -> int32 {
+  if (pss) {
+    return cr_rsa_sign_pss(out, cap, ol, &c->msg[0], c->ml, c->hash, k);
+  }
+  return cr_rsa_sign_pkcs1(out, cap, ol, &c->msg[0], c->ml, c->hash, k);
+}
+
+fn edges(label: string, row: string) {
+  var c: SignCase;
+  tc_ok(label + " fields", load(&c, row));
+  var pss: bool = c.pss;
+  var k: CrRsaPrivate;
+  key_of(&c, &k);
+  var out: uint8[520];
+  var ol: int64 = 0;
+  tc_rc(label + " base case", sign_any(&c, &k, &out[0], 520, &ol, pss), CR_OK);
+  tc_ok(label + " base case verifies", ol == c.nl && verify(&c, &out[0], ol));
+
+  // Exactly the modulus length of room is enough.
+  for i in 0..520 { out[i] = 0xA5; }
+  tc_rc(label + " capacity equal to the modulus", sign_any(&c, &k, &out[0], c.nl, &ol, pss), CR_OK);
+  tc_ok(label + " capacity equal verifies", ol == c.nl && verify(&c, &out[0], ol) && out[c.nl] == 0xA5);
+
+  // One byte less: CR_E_SPACE, nothing written, the length needed returned.
+  for i in 0..520 { out[i] = 0xA5; }
+  ol = 0;
+  tc_rc(label + " capacity one short", sign_any(&c, &k, &out[0], c.nl - 1, &ol, pss), CR_E_SPACE);
+  tc_ok(label + " capacity one short length", ol == c.nl);
+  var untouched: bool = true;
+  for i in 0..520 { if (out[i] != 0xA5) { untouched = false; } }
+  tc_ok(label + " capacity one short writes nothing", untouched);
+  tc_rc(label + " capacity 0", sign_any(&c, &k, &out[0], 0, &ol, pss), CR_E_SPACE);
+  tc_rc(label + " negative capacity", sign_any(&c, &k, &out[0], -1, &ol, pss), CR_E_ARG);
+  tc_ok(label + " negative capacity length", ol == 0);
+
+  // Unknown hash.
+  var hid: int32 = c.hash;
+  c.hash = 0;
+  ol = 5;
+  tc_rc(label + " hash id 0", sign_any(&c, &k, &out[0], 520, &ol, pss), CR_E_ARG);
+  tc_ok(label + " hash id 0 length", ol == 0);
+  c.hash = 4;
+  tc_rc(label + " hash id 4", sign_any(&c, &k, &out[0], 520, &ol, pss), CR_E_ARG);
+  c.hash = -1;
+  tc_rc(label + " hash id -1", sign_any(&c, &k, &out[0], 520, &ol, pss), CR_E_ARG);
+  c.hash = hid;
+
+  // Null pointers and negative length.
+  tc_rc(label + " null sig_len", sign_any(&c, &k, &out[0], 520, 0, pss), CR_E_ARG);
+  tc_rc(label + " null sig", sign_any(&c, &k, 0, 520, &ol, pss), CR_E_ARG);
+  tc_rc(label + " null key", sign_any(&c, 0, &out[0], 520, &ol, pss), CR_E_ARG);
+  if (pss) {
+    tc_rc(label + " null message", cr_rsa_sign_pss(&out[0], 520, &ol, 0, 5, c.hash, &k), CR_E_ARG);
+    tc_rc(label + " negative message length", cr_rsa_sign_pss(&out[0], 520, &ol, &c.msg[0], -1, c.hash, &k), CR_E_ARG);
+    tc_rc(label + " empty message", cr_rsa_sign_pss(&out[0], 520, &ol, 0, 0, c.hash, &k), CR_OK);
+    tc_ok(label + " empty message verifies", cr_rsa_verify_pss(&out[0], ol, 0, 0, c.hash, &c.n[0], c.nl, &c.e[0], c.el));
+  } else {
+    tc_rc(label + " null message", cr_rsa_sign_pkcs1(&out[0], 520, &ol, 0, 5, c.hash, &k), CR_E_ARG);
+    tc_rc(label + " negative message length", cr_rsa_sign_pkcs1(&out[0], 520, &ol, &c.msg[0], -1, c.hash, &k), CR_E_ARG);
+    tc_rc(label + " empty message", cr_rsa_sign_pkcs1(&out[0], 520, &ol, 0, 0, c.hash, &k), CR_OK);
+    tc_ok(label + " empty message verifies", cr_rsa_verify_pkcs1(&out[0], ol, 0, 0, c.hash, &c.n[0], c.nl, &c.e[0], c.el));
+  }
+
+  // Bad key parts.
+  var bad: CrRsaPrivate = k;
+  bad.n = 0;
+  tc_rc(label + " null modulus", sign_any(&c, &bad, &out[0], 520, &ol, pss), CR_E_ARG);
+  bad = k;
+  bad.e = 0;
+  tc_rc(label + " null exponent", sign_any(&c, &bad, &out[0], 520, &ol, pss), CR_E_ARG);
+  bad = k;
+  bad.p = 0;
+  tc_rc(label + " null p", sign_any(&c, &bad, &out[0], 520, &ol, pss), CR_E_ARG);
+  bad = k;
+  bad.q = 0;
+  tc_rc(label + " null q", sign_any(&c, &bad, &out[0], 520, &ol, pss), CR_E_ARG);
+  bad = k;
+  bad.dp = 0;
+  tc_rc(label + " null dp", sign_any(&c, &bad, &out[0], 520, &ol, pss), CR_E_ARG);
+  bad = k;
+  bad.dq = 0;
+  tc_rc(label + " null dq", sign_any(&c, &bad, &out[0], 520, &ol, pss), CR_E_ARG);
+  bad = k;
+  bad.qinv = 0;
+  tc_rc(label + " null qinv", sign_any(&c, &bad, &out[0], 520, &ol, pss), CR_E_ARG);
+  bad = k;
+  bad.p_len = 0;
+  tc_rc(label + " empty p", sign_any(&c, &bad, &out[0], 520, &ol, pss), CR_E_ARG);
+  bad = k;
+  bad.q_len = 0;
+  tc_rc(label + " empty q", sign_any(&c, &bad, &out[0], 520, &ol, pss), CR_E_ARG);
+  bad = k;
+  bad.dp_len = 0;
+  tc_rc(label + " empty dp", sign_any(&c, &bad, &out[0], 520, &ol, pss), CR_E_ARG);
+  bad = k;
+  bad.dq_len = 0;
+  tc_rc(label + " empty dq", sign_any(&c, &bad, &out[0], 520, &ol, pss), CR_E_ARG);
+  bad = k;
+  bad.qinv_len = 0;
+  tc_rc(label + " empty qinv", sign_any(&c, &bad, &out[0], 520, &ol, pss), CR_E_ARG);
+  bad = k;
+  bad.n_len = -1;
+  tc_rc(label + " negative modulus length", sign_any(&c, &bad, &out[0], 520, &ol, pss), CR_E_ARG);
+  bad = k;
+  bad.p_len = c.pl - 1;
+  tc_rc(label + " p one byte short", sign_any(&c, &bad, &out[0], 520, &ol, pss), CR_E_ARG);
+  bad = k;
+  bad.n_len = c.nl - 1;
+  tc_rc(label + " modulus one byte short", sign_any(&c, &bad, &out[0], 520, &ol, pss), CR_E_ARG);
+  bad = k;
+  bad.dp_len = 513;
+  tc_rc(label + " oversized dp", sign_any(&c, &bad, &out[0], 520, &ol, pss), CR_E_ARG);
+
+  // Even values, on copies of the key bytes.
+  var ev: SignCase = c;
+  var kv: CrRsaPrivate;
+  key_of(&ev, &kv);
+  ev.p[ev.pl - 1] = ev.p[ev.pl - 1] ^ 1;
+  tc_rc(label + " even p", sign_any(&ev, &kv, &out[0], 520, &ol, pss), CR_E_ARG);
+  ev = c;
+  ev.q[ev.ql - 1] = ev.q[ev.ql - 1] ^ 1;
+  tc_rc(label + " even q", sign_any(&ev, &kv, &out[0], 520, &ol, pss), CR_E_ARG);
+  ev = c;
+  ev.n[ev.nl - 1] = ev.n[ev.nl - 1] ^ 1;
+  tc_rc(label + " even modulus", sign_any(&ev, &kv, &out[0], 520, &ol, pss), CR_E_ARG);
+  ev = c;
+  ev.e[ev.el - 1] = ev.e[ev.el - 1] ^ 1;
+  tc_rc(label + " even exponent", sign_any(&ev, &kv, &out[0], 520, &ol, pss), CR_E_ARG);
+
+  // A wrong public exponent or modulus makes the fault check fail.
+  ev = c;
+  ev.e[ev.el - 1] = ev.e[ev.el - 1] ^ 2;
+  for i in 0..520 { out[i] = 0xA5; }
+  tc_rc(label + " wrong public exponent", sign_any(&ev, &kv, &out[0], 520, &ol, pss), CR_E_INTERNAL);
+  tc_ok(label + " wrong public exponent wiped", all_zero(&out[0], c.nl));
+  ev = c;
+  ev.n[ev.nl - 1] = ev.n[ev.nl - 1] ^ 2;
+  for i in 0..520 { out[i] = 0xA5; }
+  tc_rc(label + " wrong modulus", sign_any(&ev, &kv, &out[0], 520, &ol, pss), CR_E_INTERNAL);
+  tc_ok(label + " wrong modulus wiped", all_zero(&out[0], c.nl));
+
+  // Leading zero bytes on the modulus and the exponent are ignored.
+  var z: SignCase = c;
+  var i: int64 = c.nl;
+  while (i > 0) {
+    z.n[i + 2] = c.n[i - 1];
+    i = i - 1;
+  }
+  z.n[0] = 0;
+  z.n[1] = 0;
+  z.n[2] = 0;
+  z.nl = c.nl + 3;
+  var kz: CrRsaPrivate;
+  key_of(&z, &kz);
+  tc_rc(label + " modulus with leading zeros", sign_any(&z, &kz, &out[0], 520, &ol, pss), CR_OK);
+  tc_ok(label + " modulus with leading zeros length", ol == c.nl && verify(&c, &out[0], ol));
+}
+
+fn salt_edges(row: string) {
+  var c: SignCase;
+  tc_ok("salt fields", load(&c, row));
+  var k: CrRsaPrivate;
+  key_of(&c, &k);
+  var out: uint8[520];
+  var ol: int64 = 0;
+  tc_rc("salt 65 bytes", crx_rsa_sign_pss_salt(&out[0], 520, &ol, &c.msg[0], c.ml, c.hash, &c.salt[0], 65, &k), CR_E_ARG);
+  tc_rc("salt negative length", crx_rsa_sign_pss_salt(&out[0], 520, &ol, &c.msg[0], c.ml, c.hash, &c.salt[0], -1, &k), CR_E_ARG);
+  tc_rc("null salt", crx_rsa_sign_pss_salt(&out[0], 520, &ol, &c.msg[0], c.ml, c.hash, 0, 8, &k), CR_E_ARG);
+  tc_rc("empty salt", crx_rsa_sign_pss_salt(&out[0], 520, &ol, &c.msg[0], c.ml, c.hash, 0, 0, &k), CR_OK);
+  tc_ok("empty salt length", ol == c.nl);
+  tc_rc("salt 64 bytes", crx_rsa_sign_pss_salt(&out[0], 520, &ol, &c.msg[0], c.ml, c.hash, &c.salt[0], 64, &k), CR_OK);
+}
+
+fn time_row(label: string, row: string) {
+  var c: SignCase;
+  tc_ok(label + " timing fields", load(&c, row));
+  var k: CrRsaPrivate;
+  key_of(&c, &k);
+  var out: uint8[520];
+  var ol: int64 = 0;
+  var iters: int64 = 20;
+  var t0: int64 = bench_time_us();
+  var good: int64 = 0;
+  for it in 0..iters {
+    if (sign_any(&c, &k, &out[0], 520, &ol, c.pss) == CR_OK) { good = good + 1; }
+  }
+  var t1: int64 = bench_time_us();
+  tc_ok(label + " timing statuses", good == iters);
+  var per: int64 = (t1 - t0) / iters;
+  println("time " + label + ": {per} us per sign ({iters} runs)");
+}
+
+fn main() -> int32 {
+  rows();
+  tc_ok("rows seen", g_rows_pkcs1 == 60 && g_rows_pss == 60);
+  println("rows: {g_rows_pkcs1} pkcs1, {g_rows_pss} pss");
+  tc_ok("sample rows found", g_first_pkcs1_2048.length > 0 && g_first_pkcs1_3072.length > 0 && g_first_pss_2048.length > 0 && g_first_pss_3072.length > 0);
+  faults();
+  edges("pkcs1 2048 edge", g_first_pkcs1_2048);
+  edges("pkcs1 3072 edge", g_first_pkcs1_3072);
+  edges("pss 2048 edge", g_first_pss_2048);
+  edges("pss 3072 edge", g_first_pss_3072);
+  salt_edges(g_first_pss_2048);
+  time_row("pkcs1 2048", g_first_pkcs1_2048);
+  time_row("pkcs1 3072", g_first_pkcs1_3072);
+  time_row("pss 2048", g_first_pss_2048);
+  time_row("pss 3072", g_first_pss_3072);
+  return tc_finish("rsa_sign");
+}
