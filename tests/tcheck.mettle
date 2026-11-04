@@ -102,3 +102,22 @@ export fn tc_finish(suite: string) -> int32 {
   println("FAILED " + suite + " ({g_tc_fails} of {g_tc_checks} checks)");
   return 1;
 }
+
+// Field i (from 0) of a '|'-separated vector row, as a view into row.
+export fn tc_field(row: string, index: int32) -> string {
+  var start: int64 = 0;
+  var field: int32 = 0;
+  var i: int64 = 0;
+  var n: int64 = (int64)row.length;
+  while (i <= n) {
+    if (i == n || row.chars[i] == (uint8)'|') {
+      if (field == index) {
+        return str_from_bytes((cstring)&row.chars[start], i - start);
+      }
+      field = field + 1;
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  return "";
+}
