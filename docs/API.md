@@ -1,6 +1,6 @@
 # Cryptex API
 
-Generated from the `///` contracts in `src/` by `tools/api_docs.py`. Do not edit by hand.
+Generated from the `///` contracts in `src/`. Do not edit by hand.
 
 Pure Mettle: no C, no shared state. Every function is safe on any thread.
 
