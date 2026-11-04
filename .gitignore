@@ -1,9 +1,6 @@
 build/
 .mbuild/
 mettle.deps
-tests/build/
-tests/.mbuild/
-tests/mettle.deps
 tests/dependent/build/
 tests/dependent/.mbuild/
 tests/dependent/mettle.deps

@@ -1,4 +1,4 @@
-// Shared checks for the crypto test programs. Hex here is a plain Mettle
+// Shared checks for the test programs (tests/*_test.mettle). Hex here is a plain Mettle
 // loop, so vector checks do not depend on the library's own encoder.
 
 import "std/io";

@@ -11,7 +11,7 @@ Cryptex writes no crypto of its own. Every primitive is a libsodium call. Crypte
 
 - libsodium 1.0.18 or newer (runtime only). On Debian: `libsodium23`.
 - Linux x86-64.
-- The Mettle compiler and mbuild 0.2.0.
+- The Mettle compiler and a current mbuild (with `mb_link_lib_any` and `mbuild test`).
 
 ## Install
 
@@ -98,10 +98,13 @@ Store the text from `cr_pwhash_text`. After a good login, `cr_pwhash_needs_rehas
 
 ```bash
 export METTLE=/path/to/Mettle/bin/mettle
-mbuild test-programs
+mbuild test        # debug
+mbuild test -r     # release
 ```
 
-Builds and runs every suite in debug and release. Each prints one `OK` line. Test vectors come from the RFCs and were checked again with Python.
+Each `tests/<name>_test.mettle` is a test program. Test vectors come from the RFCs and were checked again with Python.
+
+`tests/dependent` is a small project that uses Cryptex with no link flags of its own. Check it with `cd tests/dependent && mbuild run`.
 
 ## Docs
 
