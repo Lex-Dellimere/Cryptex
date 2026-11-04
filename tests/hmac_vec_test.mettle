@@ -1,0 +1,54 @@
+// HMAC-SHA256 / HMAC-SHA512 against every row of tests/vec_mac.mettle
+// (generated from libsodium's init/update/final): one-shot, streaming in two
+// uneven parts, verify true, and verify false after flipping a tag bit.
+import "crypto/crypto";
+import "tcheck";
+import "vec_mac";
+
+fn main() -> int32 {
+  var key: uint8[300];
+  var msg: uint8[3000];
+  for r in 0..VEC_MAC_N {
+    var row: string = VEC_MAC[r];
+    var label: string = "row {r}";
+    var klen: int64 = tc_unhex(tc_field(row, 0), &key[0], 300);
+    var n: int64 = tc_unhex(tc_field(row, 1), &msg[0], 3000);
+    tc_ok(label + " decoded", klen >= 0 && n >= 0);
+    var want256: string = tc_field(row, 2);
+    var want512: string = tc_field(row, 3);
+    var h: int64 = n / 3;
+
+    var t: CrHmacSha256;
+    tc_rc(label + " 256 rc", cr_hmac_sha256(&t, &key[0], klen, &msg[0], n), CR_OK);
+    tc_hex_eq(label + " 256", &t.b[0], 32, want256);
+    var st: CrHmacSha256State;
+    var t2: CrHmacSha256;
+    tc_rc(label + " 256 init", cr_hmac_sha256_init(&st, &key[0], klen), CR_OK);
+    tc_rc(label + " 256 upd1", cr_hmac_sha256_update(&st, &msg[0], h), CR_OK);
+    tc_rc(label + " 256 upd2", cr_hmac_sha256_update(&st, &msg[h], n - h), CR_OK);
+    tc_rc(label + " 256 final", cr_hmac_sha256_final(&st, &t2), CR_OK);
+    tc_hex_eq(label + " 256 streamed", &t2.b[0], 32, want256);
+    tc_ok(label + " 256 state wiped", tc_all_zero(cr_hmac_sha256_state_bytes(&st), 256));
+    tc_ok(label + " 256 verify", cr_hmac_sha256_verify(&t, &key[0], klen, &msg[0], n));
+    var i256: int32 = (r * 5) % 32;
+    t.b[i256] = t.b[i256] ^ (uint8)(1 << (r % 8));
+    tc_ok(label + " 256 flipped", !cr_hmac_sha256_verify(&t, &key[0], klen, &msg[0], n));
+
+    var u: CrHmacSha512;
+    tc_rc(label + " 512 rc", cr_hmac_sha512(&u, &key[0], klen, &msg[0], n), CR_OK);
+    tc_hex_eq(label + " 512", &u.b[0], 64, want512);
+    var su: CrHmacSha512State;
+    var u2: CrHmacSha512;
+    tc_rc(label + " 512 init", cr_hmac_sha512_init(&su, &key[0], klen), CR_OK);
+    tc_rc(label + " 512 upd1", cr_hmac_sha512_update(&su, &msg[0], h), CR_OK);
+    tc_rc(label + " 512 upd2", cr_hmac_sha512_update(&su, &msg[h], n - h), CR_OK);
+    tc_rc(label + " 512 final", cr_hmac_sha512_final(&su, &u2), CR_OK);
+    tc_hex_eq(label + " 512 streamed", &u2.b[0], 64, want512);
+    tc_ok(label + " 512 state wiped", tc_all_zero(cr_hmac_sha512_state_bytes(&su), 512));
+    tc_ok(label + " 512 verify", cr_hmac_sha512_verify(&u, &key[0], klen, &msg[0], n));
+    var i512: int32 = (r * 7) % 64;
+    u.b[i512] = u.b[i512] ^ (uint8)(1 << (r % 8));
+    tc_ok(label + " 512 flipped", !cr_hmac_sha512_verify(&u, &key[0], klen, &msg[0], n));
+  }
+  return tc_finish("hmac_vec");
+}

@@ -1,4 +1,5 @@
-// Hashes: SHA-256, SHA-512 (libsodium) and BLAKE2b (pure Mettle, blake2b.mettle).
+// Hashes: SHA-256, SHA-512 (FIPS 180-4, sha2) and BLAKE2b (RFC 7693, blake2b),
+// all pure Mettle.
 //
 // None of these is a password hash (use cr_pwhash_str) or a MAC (use
 // cr_hmac_* or keyed BLAKE2b).
@@ -7,9 +8,7 @@ import "status";
 import "types";
 import "core";
 import "blake2b";
-
-extern fn crypto_hash_sha256(out: uint8*, inp: uint8*, inlen: uint64) -> int32 = "crypto_hash_sha256";
-extern fn crypto_hash_sha512(out: uint8*, inp: uint8*, inlen: uint64) -> int32 = "crypto_hash_sha512";
+import "sha2";
 
 /// Smallest BLAKE2b output length cr_blake2b accepts (a hash shorter than this is too weak to be useful).
 /// in: - 
@@ -42,31 +41,37 @@ fn cr_hash_in(p: uint8*, n: int64) -> uint8* {
   return p;
 }
 
-/// Computes SHA-256 of n bytes (FIPS 180-4; libsodium crypto_hash_sha256).
+/// Computes SHA-256 of n bytes (FIPS 180-4).
 /// in: out; msg readable for n bytes (may be 0 when n == 0); n >= 0
 /// returns: CR_OK; CR_E_ARG (null out, null msg with n > 0, n < 0);
 ///   CR_E_INIT. On error out is not written
 /// owns: nothing; the caller owns out and msg
-/// thread: main thread only
+/// thread: any thread (no shared state)
 /// example: var d: CrSha256; cr_sha256(&d, s.chars, (int64)s.length);
 export fn cr_sha256(out: CrSha256*, msg: uint8*, n: int64) -> int32 {
   if (out == 0 || n < 0 || (msg == 0 && n > 0)) { return CR_E_ARG; }
   if (cr_init() != CR_OK) { return CR_E_INIT; }
-  if (crypto_hash_sha256(&out->b[0], cr_hash_in(msg, n), (uint64)n) != 0) { return CR_E_INTERNAL; }
+  var s: CrxSha256;
+  crx_sha256_init(&s);
+  crx_sha256_update(&s, msg, n);
+  crx_sha256_final(&s, &out->b[0]);
   return CR_OK;
 }
 
-/// Computes SHA-512 of n bytes (FIPS 180-4; libsodium crypto_hash_sha512).
+/// Computes SHA-512 of n bytes (FIPS 180-4).
 /// in: out; msg readable for n bytes (may be 0 when n == 0); n >= 0
 /// returns: CR_OK; CR_E_ARG (null out, null msg with n > 0, n < 0);
 ///   CR_E_INIT. On error out is not written
 /// owns: nothing; the caller owns out and msg
-/// thread: main thread only
+/// thread: any thread (no shared state)
 /// example: var d: CrSha512; cr_sha512(&d, s.chars, (int64)s.length);
 export fn cr_sha512(out: CrSha512*, msg: uint8*, n: int64) -> int32 {
   if (out == 0 || n < 0 || (msg == 0 && n > 0)) { return CR_E_ARG; }
   if (cr_init() != CR_OK) { return CR_E_INIT; }
-  if (crypto_hash_sha512(&out->b[0], cr_hash_in(msg, n), (uint64)n) != 0) { return CR_E_INTERNAL; }
+  var s: CrxSha512;
+  crx_sha512_init(&s);
+  crx_sha512_update(&s, msg, n);
+  crx_sha512_final(&s, &out->b[0]);
   return CR_OK;
 }
 

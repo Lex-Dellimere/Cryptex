@@ -1,0 +1,48 @@
+// SHA-256 / SHA-512 against every row of tests/vec_hash.mettle (generated
+// from libsodium): the one-shot cr_ functions, and the incremental crx_ engine
+// fed in three uneven parts.
+import "crypto/crypto";
+import "crypto/sha2";
+import "tcheck";
+import "vec_hash";
+
+fn main() -> int32 {
+  var msg: uint8[3000];
+  for r in 0..VEC_HASH_N {
+    var row: string = VEC_HASH[r];
+    var label: string = "row {r}";
+    var n: int64 = tc_unhex(tc_field(row, 0), &msg[0], 3000);
+    tc_ok(label + " msg decoded", n >= 0);
+    var want256: string = tc_field(row, 1);
+    var want512: string = tc_field(row, 2);
+
+    var d: CrSha256;
+    tc_rc(label + " 256 rc", cr_sha256(&d, &msg[0], n), CR_OK);
+    tc_hex_eq(label + " 256", &d.b[0], 32, want256);
+    var e: CrSha512;
+    tc_rc(label + " 512 rc", cr_sha512(&e, &msg[0], n), CR_OK);
+    tc_hex_eq(label + " 512", &e.b[0], 64, want512);
+
+    // Three uneven parts: n/7, then n/3 more, then the rest.
+    var c1: int64 = n / 7;
+    var c2: int64 = c1 + n / 3;
+    var o: uint8[64];
+    var s: CrxSha256;
+    crx_sha256_init(&s);
+    crx_sha256_update(&s, &msg[0], c1);
+    crx_sha256_update(&s, &msg[c1], c2 - c1);
+    crx_sha256_update(&s, &msg[c2], n - c2);
+    crx_sha256_final(&s, &o[0]);
+    tc_hex_eq(label + " 256 streamed", &o[0], 32, want256);
+    tc_ok(label + " 256 state wiped", tc_all_zero((uint8*)&s, 112));
+    var t: CrxSha512;
+    crx_sha512_init(&t);
+    crx_sha512_update(&t, &msg[0], c1);
+    crx_sha512_update(&t, &msg[c1], c2 - c1);
+    crx_sha512_update(&t, &msg[c2], n - c2);
+    crx_sha512_final(&t, &o[0]);
+    tc_hex_eq(label + " 512 streamed", &o[0], 64, want512);
+    tc_ok(label + " 512 state wiped", tc_all_zero((uint8*)&t, 208));
+  }
+  return tc_finish("sha2_vec");
+}
