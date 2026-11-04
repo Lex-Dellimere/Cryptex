@@ -4,3 +4,4 @@ mettle.deps
 tests/dependent/build/
 tests/dependent/.mbuild/
 tests/dependent/mettle.deps
+.claude/
