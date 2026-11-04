@@ -2,15 +2,17 @@
 // cr_pwhash_* (pwhash.mettle). One lane (parallelism 1), no secret key and
 // no associated data. Not part of the public API.
 //
-// The memory matrix is allocated with the mmap system call (never the
-// heap), wiped and returned with munmap before the function returns.
+// The memory matrix is mapped with the mmap system call (never the heap),
+// wiped and unmapped before the function returns. Raw system calls, not
+// std/osmem, so a self-contained AArch64 binary needs no libc.
 //
 // Argon2id picks its reference blocks from the data after the first half of
 // the first pass; that data-dependent addressing is part of the algorithm.
 // The password only reaches the matrix through BLAKE2b and the BlaMka
 // compression, which are branch-free and table-free.
 
-import "std/mem";
+import "sys_x86_64" if x86_64;
+import "sys_aarch64" if aarch64;
 import "status";
 import "core";
 import "blake2b";
@@ -234,7 +236,7 @@ fn a2_fill_all(mem: uint64*, seg: int64, t_cost: uint32, total: uint32) {
 
 /// internal: Argon2id v1.3 (RFC 9106), parallelism 1, no key, no associated
 /// data. Writes outlen bytes of tag. Memory is m_kib KiB rounded down to a
-/// multiple of 4, taken from mmap and wiped and unmapped before returning.
+/// multiple of 4, mapped with the mmap system call and wiped and unmapped before returning.
 /// in: out writable for outlen bytes; outlen >= 4; pw readable for pwlen
 ///   bytes (0 allowed when pwlen == 0); salt readable for saltlen >= 8 bytes;
 ///   t_cost >= 1; m_kib >= 8
@@ -249,10 +251,10 @@ export fn crx_argon2id(out: uint8*, outlen: int64, pw: uint8*, pwlen: int64, sal
   var seg: int64 = (int64)(m_kib / 4);
   var blocks: int64 = seg * 4;
   var bytes: int64 = blocks * 1024;
-  var base: int64 = syscall(9, 0, bytes, 3, 0x22, -1, 0);
+  var base: int64 = syscall(CRX_SYS_MMAP, 0, bytes, 3, 0x22, -1, 0);
   if (base <= 0) { return CR_E_INTERNAL; }
   var raw: uint8* = (uint8*)base;
-  memory_region(raw, bytes);
+  crx_region_begin(raw, bytes);
   var mem: uint64* = (uint64*)base;
 
   // H0 (RFC 9106 section 3.2)
@@ -297,7 +299,7 @@ export fn crx_argon2id(out: uint8*, outlen: int64, pw: uint8*, pwlen: int64, sal
   cr_wipe(&tmp[0], 1024);
 
   cr_wipe(raw, bytes);
-  memory_region_end(raw);
-  syscall(11, base, bytes);
+  crx_region_end(raw);
+  syscall(CRX_SYS_MUNMAP, base, bytes);
   return CR_OK;
 }

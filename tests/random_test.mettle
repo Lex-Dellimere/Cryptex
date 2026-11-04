@@ -48,6 +48,48 @@ fn main() -> int32 {
   tc_rc("random key", cr_random_bytes(&k.b[0], 32), CR_OK);
   tc_rc("wipe key", cr_wipe(&k.b[0], 32), CR_OK);
   tc_ok("key wiped", tc_all_zero(&k.b[0], 32));
+
+  // cr_is_zero
+  var z64: uint8[64];
+  tc_fill(&z64[0], 64, 0);
+  tc_ok("is_zero all zero", cr_is_zero(&z64[0], 64));
+  tc_ok("is_zero n 0", cr_is_zero(&z64[0], 0));
+  tc_ok("is_zero null with n 0", cr_is_zero(0, 0));
+  tc_ok("is_zero null", !cr_is_zero(0, 4));
+  tc_ok("is_zero negative", !cr_is_zero(&z64[0], -1));
+  z64[0] = 1;
+  tc_ok("is_zero first byte set", !cr_is_zero(&z64[0], 64));
+  tc_ok("is_zero ignores bytes past n", cr_is_zero(&z64[1], 63));
+  z64[0] = 0;
+  z64[31] = 0x80;
+  tc_ok("is_zero middle byte set", !cr_is_zero(&z64[0], 64));
+  z64[31] = 0;
+  z64[63] = 1;
+  tc_ok("is_zero last byte set", !cr_is_zero(&z64[0], 64));
+  tc_ok("is_zero range before the set byte", cr_is_zero(&z64[0], 63));
+  z64[63] = 0;
+  tc_ok("is_zero after clearing", cr_is_zero(&z64[0], 64));
+
+  // cr_wipe on every alignment and lengths 1..40 inside a larger buffer.
+  var wb: uint8[128];
+  var wipe_ok: bool = true;
+  for start in 8..24 {
+    for len in 1..41 {
+      tc_fill(&wb[0], 128, 0xAA);
+      if (cr_wipe(&wb[start], (int64)len) != CR_OK) { wipe_ok = false; }
+      for q in 0..128 {
+        var inside: bool = q >= start && q < start + len;
+        if (inside && wb[q] != 0) { wipe_ok = false; }
+        if (!inside && wb[q] != 0xAA) { wipe_ok = false; }
+      }
+    }
+  }
+  tc_ok("wipe unaligned starts, lengths 1..40", wipe_ok);
+  tc_fill(&wb[0], 128, 0xAA);
+  tc_rc("wipe zero length", cr_wipe(&wb[3], 0), CR_OK);
+  tc_ok("wipe zero length leaves the buffer", !cr_is_zero(&wb[0], 128) && wb[3] == 0xAA);
+  tc_rc("wipe negative", cr_wipe(&wb[0], -1), CR_E_ARG);
+  tc_ok("wipe negative leaves the buffer", wb[0] == 0xAA);
   tc_ok("status name", cr_status_name(CR_E_VERIFY) == "CR_E_VERIFY" && cr_status_name(42) == "CR_E_UNKNOWN");
   return tc_finish("random");
 }
