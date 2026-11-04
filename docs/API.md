@@ -4,7 +4,7 @@ Generated from the `///` contracts in `src/`. Do not edit by hand.
 
 Pure Mettle: no C, no shared state. Every function is safe on any thread.
 
-Primitives: [core/status](#corestatus), [core/types](#coretypes), [core/util](#coreutil), [core/encode](#coreencode), [hash/hash](#hashhash), [mac/mac](#macmac), [mac/kdf](#mackdf), [password/pwhash](#passwordpwhash), [cipher/aead](#cipheraead), [cipher/gcm](#ciphergcm), [ecc/kx](#ecckx), [ecc/sign](#eccsign).
+Primitives: [core/status](#corestatus), [core/types](#coretypes), [core/util](#coreutil), [core/encode](#coreencode), [hash/hash](#hashhash), [mac/mac](#macmac), [mac/kdf](#mackdf), [password/pwhash](#passwordpwhash), [cipher/aead](#cipheraead), [cipher/gcm](#ciphergcm), [ecc/kx](#ecckx), [ecc/sign](#eccsign), [ecc/p256](#eccp256).
 Recipes: [recipes/signed](#recipessigned), [recipes/token](#recipestoken), [recipes/seal](#recipesseal), [recipes/totp](#recipestotp).
 
 ## core/status
@@ -2142,6 +2142,95 @@ Verifies a detached Ed25519 signature (rejecting a non-canonical S, and non-cano
 
 ```mettle
 if (!cr_ed25519_verify(&sig, m.chars, (int64)m.length, &pk)) { reject(); }
+```
+
+## ecc/p256
+
+NIST P-256 (secp256r1) key pairs and ECDH, in pure Mettle, constant time in the secret scalar: the "m31" implementation of BearSSL, with field elements as nine 30-bit limbs, Jacobian points, a 2-bit window for arbitrary points and a 4-bit window over a precomputed table for the generator. Standards: FIPS 186-5 (the curve and key pairs), SEC 1 v2 (point encoding).
+
+### CR_P256_PUBLIC_BYTES
+
+```mettle
+export const CR_P256_PUBLIC_BYTES: int64 = 65;
+```
+
+Size in bytes of a P-256 public key: the uncompressed point 0x04 || X || Y.
+
+- **returns:** 65
+- **owns:** nothing
+- **thread:** constant
+
+```mettle
+var pk: uint8[65]; cr_p256_keypair(&pk[0], CR_P256_PUBLIC_BYTES, &sk);
+```
+
+### CrP256Secret
+
+```mettle
+export struct CrP256Secret {
+  b: uint8[32];
+}
+```
+
+A P-256 secret key, the scalar d as 32 big-endian bytes with 1 <= d <= n-1 (n is the group order).
+
+- **in:** - (zeroed when declared: `var x: CrP256Secret;`)
+- **owns:** secret: wipe with cr_wipe(&sk.b[0], 32) when done
+- **thread:** any thread (no shared state)
+
+```mettle
+var sk: CrP256Secret; cr_p256_keypair(&pk[0], 65, &sk);
+```
+
+### cr_p256_keypair
+
+```mettle
+export fn cr_p256_keypair(pk: uint8*, pk_cap: int64, sk: CrP256Secret*) -> int32
+```
+
+Generates a P-256 key pair: a uniformly random secret scalar in [1, n-1] (rejection sampling on 32 random bytes) and its public key, the uncompressed point 0x04 || X || Y.
+
+- **in:** pk, writable for pk_cap bytes, pk_cap >= 65 (CR_P256_PUBLIC_BYTES); sk
+- **returns:** CR_OK; CR_E_ARG (null pointer or negative pk_cap); CR_E_SPACE if pk_cap < 65 (nothing is written); CR_E_INTERNAL if the kernel random source fails (sk is wiped)
+- **owns:** sk is secret caller memory: cr_wipe(&sk.b[0], 32) when done; pk is public
+- **thread:** any thread (no shared state)
+
+```mettle
+var pk: uint8[65]; var sk: CrP256Secret; cr_p256_keypair(&pk[0], 65, &sk);
+```
+
+### cr_p256_public_from_secret
+
+```mettle
+export fn cr_p256_public_from_secret(pk: uint8*, pk_cap: int64, sk: CrP256Secret*) -> int32
+```
+
+Computes the public key of a P-256 secret scalar: the uncompressed point 0x04 || X || Y of d * G.
+
+- **in:** pk, writable for pk_cap bytes, pk_cap >= 65 (CR_P256_PUBLIC_BYTES); sk
+- **returns:** CR_OK; CR_E_ARG (null pointer or negative pk_cap); CR_E_SPACE if pk_cap < 65 (nothing is written); CR_E_KEY if the scalar is 0 or not lower than the group order n (the first 65 bytes of pk are wiped)
+- **owns:** nothing
+- **thread:** any thread (no shared state)
+
+```mettle
+if (cr_p256_public_from_secret(&pk[0], 65, &sk) != CR_OK) { reject(); }
+```
+
+### cr_p256_ecdh
+
+```mettle
+export fn cr_p256_ecdh(shared: CrKey32*, sk: CrP256Secret*, peer: uint8*, peer_len: int64) -> int32
+```
+
+Computes the raw ECDH shared secret of P-256: the X coordinate of the point sk * peer, as 32 big-endian bytes. This is not a key: feed it into a KDF (cr_hkdf_sha256 or cr_hkdf_sha384) with both public keys and a context string. The peer key is validated: it must be exactly 65 bytes, 0x04 || X || Y, with X and Y lower than the field prime and the point on the curve (the curve has prime order, so there are no small subgroups).
+
+- **in:** shared; sk, our secret key; peer, readable for peer_len bytes
+- **returns:** CR_OK; CR_E_ARG (null pointer, negative peer_len); CR_E_KEY if peer is not a valid public key (wrong length or format, coordinates out of range, not on the curve) or sk is 0 or not lower than n (shared is wiped)
+- **owns:** shared is secret caller memory: cr_wipe(&shared.b[0], 32) when done
+- **thread:** any thread (no shared state)
+
+```mettle
+var z: CrKey32; if (cr_p256_ecdh(&z, &sk, &peer[0], 65) != CR_OK) { reject(); }
 ```
 
 ## recipes/signed

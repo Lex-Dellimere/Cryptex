@@ -1,0 +1,709 @@
+// NIST P-256 key pairs and ECDH (FIPS 186-5, SEC 1 v2): NIST CAVP key pair,
+// ECDH and public key validation rows (tests/vectors/vec_cavp_keypair_256,
+// vec_cavp_ecdh_256, vec_cavp_pkv_256), Wycheproof ECDH rows
+// (tests/vectors/vec_wp_ecdh_256), random key pairs that must agree, scalar
+// and public key edge cases, wiping, argument checks, the internal point
+// routines ECDSA is built on, and the 31-bit big integer routines against
+// Python integers (tests/vectors/vec_i31).
+//
+// Row formats, hex fields joined by '|':
+//   keypair: d | Q                      public_from_secret(d) == Q
+//   ecdh:    Q_peer | d | Q_own | Z      public_from_secret(d) == Q_own,
+//                                        ecdh(d, Q_peer) == Z
+//   pkv:     Q | v-or-i                  ecdh(1, Q) is CR_OK for "v" and
+//                                        CR_E_KEY for "i"
+//   wp:      d | public | shared | v-or-i   "v": CR_OK and shared matches,
+//                                        "i": CR_E_KEY and shared wiped
+import "crypto/crypto";
+import "crypto/ecc/p256";
+import "crypto/ecc/i31";
+import "tcheck";
+import "vectors/vec_cavp_keypair_256";
+import "vectors/vec_cavp_ecdh_256";
+import "vectors/vec_cavp_pkv_256";
+import "vectors/vec_wp_ecdh_256";
+import "vectors/vec_i31";
+
+fn keypair_rows() {
+  for r in 0..VEC_CAVP_KEYPAIR_256_N {
+    var row: string = VEC_CAVP_KEYPAIR_256[r];
+    var sk: CrP256Secret;
+    var want: uint8[65];
+    var got: uint8[65];
+    var label: string = "keypair row {r}";
+    var dl: int64 = tc_unhex(tc_field(row, 0), &sk.b[0], 32);
+    var ql: int64 = tc_unhex(tc_field(row, 1), &want[0], 65);
+    tc_ok(label + " fields", dl == 32 && ql == 65);
+    tc_fill(&got[0], 65, 255);
+    tc_rc(label, cr_p256_public_from_secret(&got[0], 65, &sk), CR_OK);
+    tc_ok(label + " public key", cr_equal(&got[0], &want[0], 65));
+    cr_wipe(&sk.b[0], 32);
+  }
+}
+
+fn ecdh_rows() {
+  for r in 0..VEC_CAVP_ECDH_256_N {
+    var row: string = VEC_CAVP_ECDH_256[r];
+    var sk: CrP256Secret;
+    var peer: uint8[65];
+    var own: uint8[65];
+    var got: uint8[65];
+    var want: uint8[32];
+    var z: CrKey32;
+    var label: string = "ecdh row {r}";
+    var pl: int64 = tc_unhex(tc_field(row, 0), &peer[0], 65);
+    var dl: int64 = tc_unhex(tc_field(row, 1), &sk.b[0], 32);
+    var ol: int64 = tc_unhex(tc_field(row, 2), &own[0], 65);
+    var zl: int64 = tc_unhex(tc_field(row, 3), &want[0], 32);
+    tc_ok(label + " fields", pl == 65 && dl == 32 && ol == 65 && zl == 32);
+    tc_rc(label + " public key", cr_p256_public_from_secret(&got[0], 65, &sk), CR_OK);
+    tc_ok(label + " own public key", cr_equal(&got[0], &own[0], 65));
+    tc_rc(label, cr_p256_ecdh(&z, &sk, &peer[0], 65), CR_OK);
+    tc_ok(label + " shared secret", cr_equal(&z.b[0], &want[0], 32));
+    cr_wipe(&z.b[0], 32);
+    cr_wipe(&sk.b[0], 32);
+  }
+}
+
+fn pkv_rows() {
+  var sk: CrP256Secret;
+  sk.b[31] = 1;
+  for r in 0..VEC_CAVP_PKV_256_N {
+    var row: string = VEC_CAVP_PKV_256[r];
+    var q: uint8[70];
+    var z: CrKey32;
+    var label: string = "pkv row {r}";
+    var ql: int64 = tc_unhex(tc_field(row, 0), &q[0], 70);
+    var verdict: string = tc_field(row, 1);
+    tc_ok(label + " fields", ql > 0);
+    tc_fill(&z.b[0], 32, 170);
+    if (verdict == "v") {
+      tc_rc(label + " valid", cr_p256_ecdh(&z, &sk, &q[0], ql), CR_OK);
+      // 1 * Q is Q itself, so the shared secret is the X coordinate.
+      tc_ok(label + " shared is X", ql == 65 && cr_equal(&z.b[0], &q[1], 32));
+    } else {
+      tc_rc(label + " invalid", cr_p256_ecdh(&z, &sk, &q[0], ql), CR_E_KEY);
+      tc_ok(label + " shared wiped", tc_all_zero(&z.b[0], 32));
+    }
+  }
+  cr_wipe(&sk.b[0], 32);
+}
+
+fn wycheproof_rows() {
+  for r in 0..VEC_WP_ECDH_256_N {
+    var row: string = VEC_WP_ECDH_256[r];
+    var sk: CrP256Secret;
+    var pub: uint8[200];
+    var want: uint8[32];
+    var z: CrKey32;
+    var label: string = "wycheproof row {r}";
+    var dl: int64 = tc_unhex(tc_field(row, 0), &sk.b[0], 32);
+    var pl: int64 = tc_unhex(tc_field(row, 1), &pub[0], 200);
+    var wl: int64 = tc_unhex(tc_field(row, 2), &want[0], 32);
+    var verdict: string = tc_field(row, 3);
+    tc_ok(label + " fields", dl == 32 && pl >= 0 && wl >= 0);
+    tc_fill(&z.b[0], 32, 170);
+    if (verdict == "v") {
+      tc_rc(label, cr_p256_ecdh(&z, &sk, &pub[0], pl), CR_OK);
+      tc_ok(label + " shared secret", wl == 32 && cr_equal(&z.b[0], &want[0], 32));
+    } else {
+      tc_rc(label + " (invalid)", cr_p256_ecdh(&z, &sk, &pub[0], pl), CR_E_KEY);
+      tc_ok(label + " shared wiped", tc_all_zero(&z.b[0], 32));
+    }
+    cr_wipe(&sk.b[0], 32);
+  }
+}
+
+// Fresh key pairs: the public key matches the secret, two sides agree, the
+// secret is in range, and nothing repeats.
+fn round_trips() {
+  var seen: uint8[65];
+  var distinct: bool = true;
+  for r in 0..20 {
+    var pka: uint8[65];
+    var pkb: uint8[65];
+    var again: uint8[65];
+    var ska: CrP256Secret;
+    var skb: CrP256Secret;
+    var za: CrKey32;
+    var zb: CrKey32;
+    var label: string = "round trip {r}";
+    tc_rc(label + " keypair a", cr_p256_keypair(&pka[0], 65, &ska), CR_OK);
+    tc_rc(label + " keypair b", cr_p256_keypair(&pkb[0], 65, &skb), CR_OK);
+    tc_ok(label + " uncompressed", pka[0] == 4 && pkb[0] == 4);
+    tc_rc(label + " public from secret", cr_p256_public_from_secret(&again[0], 65, &ska), CR_OK);
+    tc_ok(label + " same point", cr_equal(&again[0], &pka[0], 65));
+    tc_rc(label + " ecdh a", cr_p256_ecdh(&za, &ska, &pkb[0], 65), CR_OK);
+    tc_rc(label + " ecdh b", cr_p256_ecdh(&zb, &skb, &pka[0], 65), CR_OK);
+    tc_ok(label + " agree", cr_equal(&za.b[0], &zb.b[0], 32) && !cr_is_zero(&za.b[0], 32));
+    if (r == 0) {
+      for i in 0..65 { seen[i] = pka[i]; }
+    } else if (cr_equal(&seen[0], &pka[0], 65)) {
+      distinct = false;
+    }
+    // The secret is nonzero and below n.
+    var n: uint8[32];
+    crx_p256_order(&n[0]);
+    var below: bool = false;
+    for i in 0..32 {
+      if (!below && ska.b[i] != n[i]) {
+        below = ska.b[i] < n[i];
+        if (!below) { break; }
+      }
+    }
+    tc_ok(label + " secret below n", below && !cr_is_zero(&ska.b[0], 32));
+    cr_wipe(&ska.b[0], 32);
+    cr_wipe(&skb.b[0], 32);
+    cr_wipe(&za.b[0], 32);
+    cr_wipe(&zb.b[0], 32);
+  }
+  tc_ok("round trips: public keys differ", distinct);
+}
+
+fn set_scalar(sk: CrP256Secret*, hex: string) {
+  tc_unhex(hex, &sk->b[0], 32);
+}
+
+// Scalars at the edges of [1, n-1].
+fn scalar_edges() {
+  var sk: CrP256Secret;
+  var pk: uint8[70];
+  var pk2: uint8[65];
+  var g: uint8[65];
+  var z: CrKey32;
+  var order: uint8[32];
+  crx_p256_order(&order[0]);
+  tc_hex_eq("order", &order[0], 32, "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551");
+  tc_unhex("046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5", &g[0], 65);
+
+  // d = 1 gives the generator.
+  set_scalar(&sk, "0000000000000000000000000000000000000000000000000000000000000001");
+  tc_rc("d = 1", cr_p256_public_from_secret(&pk[0], 65, &sk), CR_OK);
+  tc_ok("d = 1 is the generator", cr_equal(&pk[0], &g[0], 65));
+
+  // d = n - 1 gives -G: the same X and the negated Y (p - Gy).
+  set_scalar(&sk, "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632550");
+  tc_rc("d = n-1", cr_p256_public_from_secret(&pk[0], 65, &sk), CR_OK);
+  tc_hex_eq("d = n-1 is -G", &pk[0], 65, "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296b01cbd1c01e58065711814b583f061e9d431cca994cea1313449bf97c840ae0a");
+  // ECDH of (n-1) with G is the X coordinate of -G: that of G.
+  tc_rc("(n-1) * G", cr_p256_ecdh(&z, &sk, &g[0], 65), CR_OK);
+  tc_ok("(n-1) * G has X of G", cr_equal(&z.b[0], &g[1], 32));
+
+  // d = 2 and 3: ECDH is symmetric, 2 * (3G) = 3 * (2G) = 6G.
+  var sk2: CrP256Secret;
+  var sk3: CrP256Secret;
+  var z2: CrKey32;
+  var z3: CrKey32;
+  var pk3: uint8[65];
+  set_scalar(&sk2, "0000000000000000000000000000000000000000000000000000000000000002");
+  set_scalar(&sk3, "0000000000000000000000000000000000000000000000000000000000000003");
+  tc_rc("d = 2", cr_p256_public_from_secret(&pk2[0], 65, &sk2), CR_OK);
+  tc_rc("d = 3", cr_p256_public_from_secret(&pk3[0], 65, &sk3), CR_OK);
+  tc_rc("2 * 3G", cr_p256_ecdh(&z2, &sk2, &pk3[0], 65), CR_OK);
+  tc_rc("3 * 2G", cr_p256_ecdh(&z3, &sk3, &pk2[0], 65), CR_OK);
+  tc_ok("2 * 3G == 3 * 2G", cr_equal(&z2.b[0], &z3.b[0], 32));
+  tc_hex_eq("X of 6G", &z2.b[0], 32, "b01a172a76a4602c92d3242cb897dde3024c740debb215b4c6b0aae93c2291a9");
+
+  // Invalid scalars: 0, n, n + 1, 2^256 - 1.
+  var bads: string[4] = [
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
+    "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632552",
+    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  ];
+  for i in 0..4 {
+    set_scalar(&sk, bads[i]);
+    tc_fill(&pk[0], 70, 170);
+    tc_rc("bad scalar {i}: public key", cr_p256_public_from_secret(&pk[0], 70, &sk), CR_E_KEY);
+    tc_ok("bad scalar {i}: public key wiped", tc_all_zero(&pk[0], 65) && pk[65] == 170);
+    tc_fill(&z.b[0], 32, 170);
+    tc_rc("bad scalar {i}: ecdh", cr_p256_ecdh(&z, &sk, &g[0], 65), CR_E_KEY);
+    tc_ok("bad scalar {i}: shared wiped", tc_all_zero(&z.b[0], 32));
+  }
+  cr_wipe(&sk.b[0], 32);
+  cr_wipe(&sk2.b[0], 32);
+  cr_wipe(&sk3.b[0], 32);
+}
+
+// Peer keys that must be refused, built from the generator.
+fn peer_edges() {
+  var sk: CrP256Secret;
+  var g: uint8[70];
+  var q: uint8[70];
+  var z: CrKey32;
+  set_scalar(&sk, "00000000000000000000000000000000000000000000000000000000000000ff");
+  tc_unhex("046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5", &g[0], 70);
+  tc_rc("generator accepted", cr_p256_ecdh(&z, &sk, &g[0], 65), CR_OK);
+
+  // First byte: compressed, hybrid, infinity and junk forms.
+  var firsts: uint8[7] = [(uint8)0, (uint8)2, (uint8)3, (uint8)5, (uint8)6, (uint8)7, (uint8)0xFF];
+  for i in 0..7 {
+    for j in 0..70 { q[j] = g[j]; }
+    q[0] = firsts[i];
+    tc_fill(&z.b[0], 32, 170);
+    tc_rc("first byte {firsts[i]}", cr_p256_ecdh(&z, &sk, &q[0], 65), CR_E_KEY);
+    tc_ok("first byte {firsts[i]}: shared wiped", tc_all_zero(&z.b[0], 32));
+  }
+
+  // Lengths other than 65, including a null peer of length 0.
+  var lens: int64[8] = [(int64)0, (int64)1, (int64)32, (int64)33, (int64)64, (int64)66, (int64)67, (int64)70];
+  for i in 0..8 {
+    tc_fill(&z.b[0], 32, 170);
+    tc_rc("length {lens[i]}", cr_p256_ecdh(&z, &sk, &g[0], lens[i]), CR_E_KEY);
+    tc_ok("length {lens[i]}: shared wiped", tc_all_zero(&z.b[0], 32));
+  }
+  tc_fill(&z.b[0], 32, 170);
+  tc_rc("null peer, length 0", cr_p256_ecdh(&z, &sk, 0, 0), CR_E_KEY);
+  tc_ok("null peer: shared wiped", tc_all_zero(&z.b[0], 32));
+
+  // Coordinates not reduced: X + p and Y + p have the same residues but are
+  // not canonical. p = ffffffff00000001000000000000000000000000ffffffffffffffffffffffff.
+  tc_unhex("04ffffffff6b17d1f2e12c4247f8bce6e563a440f277037d81d2eb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5", &q[0], 70);
+  // That X is not the generator's (it is above p): not on the curve either
+  // way; the explicit non-canonical case follows.
+  tc_rc("X above p", cr_p256_ecdh(&z, &sk, &q[0], 65), CR_E_KEY);
+  // X = p (all coordinate bytes of p) with the generator's Y.
+  tc_unhex("04ffffffff00000001000000000000000000000000ffffffffffffffffffffffff4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5", &q[0], 70);
+  tc_rc("X = p", cr_p256_ecdh(&z, &sk, &q[0], 65), CR_E_KEY);
+  // The point (0, 0) is not on the curve.
+  for j in 0..70 { q[j] = 0; }
+  q[0] = 4;
+  tc_rc("point (0, 0)", cr_p256_ecdh(&z, &sk, &q[0], 65), CR_E_KEY);
+  // The generator with one bit of Y flipped is off the curve.
+  for j in 0..70 { q[j] = g[j]; }
+  q[64] = q[64] ^ 1;
+  tc_rc("Y with a flipped bit", cr_p256_ecdh(&z, &sk, &q[0], 65), CR_E_KEY);
+  for j in 0..70 { q[j] = g[j]; }
+  q[1] = q[1] ^ 0x80;
+  tc_rc("X with a flipped bit", cr_p256_ecdh(&z, &sk, &q[0], 65), CR_E_KEY);
+  tc_ok("shared still wiped", tc_all_zero(&z.b[0], 32));
+  cr_wipe(&sk.b[0], 32);
+}
+
+fn argument_errors() {
+  var sk: CrP256Secret;
+  var pk: uint8[70];
+  var g: uint8[65];
+  var z: CrKey32;
+  set_scalar(&sk, "0000000000000000000000000000000000000000000000000000000000000007");
+  tc_unhex("046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5", &g[0], 65);
+  tc_ok("public size constant", CR_P256_PUBLIC_BYTES == 65);
+
+  // keypair
+  tc_rc("keypair null pk", cr_p256_keypair(0, 65, &sk), CR_E_ARG);
+  tc_rc("keypair null sk", cr_p256_keypair(&pk[0], 65, 0), CR_E_ARG);
+  tc_rc("keypair negative capacity", cr_p256_keypair(&pk[0], -1, &sk), CR_E_ARG);
+  tc_fill(&pk[0], 70, 7);
+  var sk_before: CrP256Secret;
+  for i in 0..32 { sk_before.b[i] = sk.b[i]; }
+  tc_rc("keypair capacity 64", cr_p256_keypair(&pk[0], 64, &sk), CR_E_SPACE);
+  tc_rc("keypair capacity 0", cr_p256_keypair(&pk[0], 0, &sk), CR_E_SPACE);
+  tc_ok("keypair too small: nothing written", pk[0] == 7 && pk[63] == 7 && pk[64] == 7 && cr_equal(&sk.b[0], &sk_before.b[0], 32));
+  tc_fill(&pk[0], 70, 7);
+  tc_rc("keypair exact capacity", cr_p256_keypair(&pk[0], 65, &sk), CR_OK);
+  tc_ok("keypair writes exactly 65 bytes", pk[0] == 4 && pk[65] == 7 && pk[69] == 7);
+
+  // public_from_secret
+  set_scalar(&sk, "0000000000000000000000000000000000000000000000000000000000000007");
+  tc_rc("public null pk", cr_p256_public_from_secret(0, 65, &sk), CR_E_ARG);
+  tc_rc("public null sk", cr_p256_public_from_secret(&pk[0], 65, 0), CR_E_ARG);
+  tc_rc("public negative capacity", cr_p256_public_from_secret(&pk[0], -1, &sk), CR_E_ARG);
+  tc_fill(&pk[0], 70, 7);
+  tc_rc("public capacity 64", cr_p256_public_from_secret(&pk[0], 64, &sk), CR_E_SPACE);
+  tc_ok("public too small: nothing written", pk[0] == 7 && pk[64] == 7);
+  tc_rc("public capacity 70", cr_p256_public_from_secret(&pk[0], 70, &sk), CR_OK);
+  tc_ok("public writes exactly 65 bytes", pk[0] == 4 && pk[65] == 7);
+
+  // ecdh
+  tc_rc("ecdh null shared", cr_p256_ecdh(0, &sk, &g[0], 65), CR_E_ARG);
+  tc_fill(&z.b[0], 32, 170);
+  tc_rc("ecdh null sk", cr_p256_ecdh(&z, 0, &g[0], 65), CR_E_ARG);
+  tc_ok("ecdh null sk: shared wiped", tc_all_zero(&z.b[0], 32));
+  tc_rc("ecdh null peer", cr_p256_ecdh(&z, &sk, 0, 65), CR_E_ARG);
+  tc_rc("ecdh negative peer length", cr_p256_ecdh(&z, &sk, &g[0], -1), CR_E_ARG);
+  tc_rc("ecdh works", cr_p256_ecdh(&z, &sk, &g[0], 65), CR_OK);
+  tc_ok("ecdh result is nonzero", !cr_is_zero(&z.b[0], 32));
+  cr_wipe(&z.b[0], 32);
+  cr_wipe(&sk.b[0], 32);
+}
+
+// The internal point routines that ECDSA uses.
+fn internal_points() {
+  var five: uint8[32];
+  var six: uint8[32];
+  var a: uint8[65];
+  var b: uint8[65];
+  var g: uint8[65];
+  var r: uint8[65];
+  five[31] = 5;
+  six[31] = 6;
+  tc_unhex("046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5", &g[0], 65);
+  tc_ok("mulgen returns 65", crx_p256_mulgen(&a[0], &five[0], 32) == 65);
+  // mul of the generator agrees with mulgen.
+  for i in 0..65 { b[i] = g[i]; }
+  tc_ok("mul valid", crx_p256_mul(&b[0], 65, &five[0], 32) == 1);
+  tc_ok("mul == mulgen", cr_equal(&a[0], &b[0], 65));
+  // A short scalar encoding is the same as a padded one.
+  for i in 0..65 { b[i] = g[i]; }
+  tc_ok("mul short scalar", crx_p256_mul(&b[0], 65, &five[31], 1) == 1);
+  tc_ok("mul short scalar agrees", cr_equal(&a[0], &b[0], 65));
+  tc_ok("mulgen short scalar", crx_p256_mulgen(&r[0], &five[31], 1) == 65 && cr_equal(&r[0], &a[0], 65));
+  // Invalid point and wrong length.
+  for i in 0..65 { b[i] = g[i]; }
+  b[64] = b[64] ^ 1;
+  tc_ok("mul invalid point", crx_p256_mul(&b[0], 65, &five[0], 32) == 0);
+  tc_ok("mul wrong length", crx_p256_mul(&g[0], 64, &five[0], 32) == 0);
+
+  // muladd: 2 * (3G) + 4 * G = 10G, with B the generator or null.
+  var two: uint8[32];
+  var three: uint8[32];
+  var four: uint8[32];
+  var ten: uint8[32];
+  two[31] = 2;
+  three[31] = 3;
+  four[31] = 4;
+  ten[31] = 10;
+  var p3: uint8[65];
+  var p10: uint8[65];
+  crx_p256_mulgen(&p3[0], &three[0], 32);
+  crx_p256_mulgen(&p10[0], &ten[0], 32);
+  for i in 0..65 { a[i] = p3[i]; }
+  tc_ok("muladd (B null)", crx_p256_muladd(&a[0], 0, 65, &two[0], 32, &four[0], 32) == 1);
+  tc_ok("muladd (B null) == 10G", cr_equal(&a[0], &p10[0], 65));
+  for i in 0..65 { a[i] = p3[i]; }
+  tc_ok("muladd (B = G)", crx_p256_muladd(&a[0], &g[0], 65, &two[0], 32, &four[0], 32) == 1);
+  tc_ok("muladd (B = G) == 10G", cr_equal(&a[0], &p10[0], 65));
+  // Equal summands: 1 * (2G) + 2 * G = 4G through the doubling path.
+  var one: uint8[32];
+  one[31] = 1;
+  var p2: uint8[65];
+  var p4: uint8[65];
+  crx_p256_mulgen(&p2[0], &two[0], 32);
+  crx_p256_mulgen(&p4[0], &four[0], 32);
+  for i in 0..65 { a[i] = p2[i]; }
+  tc_ok("muladd equal summands", crx_p256_muladd(&a[0], 0, 65, &one[0], 32, &two[0], 32) == 1);
+  tc_ok("muladd equal summands == 4G", cr_equal(&a[0], &p4[0], 65));
+  // Opposite summands: 1 * G + (n - 1) * G is the point at infinity.
+  var nm1: uint8[32];
+  crx_p256_order(&nm1[0]);
+  nm1[31] = nm1[31] - 1;
+  for i in 0..65 { a[i] = g[i]; }
+  tc_ok("muladd opposite summands fails", crx_p256_muladd(&a[0], 0, 65, &one[0], 32, &nm1[0], 32) == 0);
+  // Invalid inputs.
+  for i in 0..65 { a[i] = g[i]; }
+  a[10] = a[10] ^ 1;
+  tc_ok("muladd invalid A", crx_p256_muladd(&a[0], 0, 65, &one[0], 32, &two[0], 32) == 0);
+  for i in 0..65 { a[i] = g[i]; b[i] = g[i]; }
+  b[10] = b[10] ^ 1;
+  tc_ok("muladd invalid B", crx_p256_muladd(&a[0], &b[0], 65, &one[0], 32, &two[0], 32) == 0);
+  tc_ok("muladd wrong length", crx_p256_muladd(&a[0], 0, 64, &one[0], 32, &two[0], 32) == 0);
+}
+
+// ---------------------------------------------------------------------------
+// 31-bit big integers against Python. Rows of tests/vectors/vec_i31, hex
+// fields joined by '|': op | modulus | a | b | e | expected. Unused fields
+// are empty. Integers are held in uint32 arrays of at most 80 words.
+
+const I31_WORDS: int32 = 80;
+
+// Bit length of a big-endian byte string (leading zero bits not counted).
+fn bits_of(p: uint8*, n: int64) -> uint32 {
+  var i: int64 = 0;
+  while (i < n && p[i] == 0) { i = i + 1; }
+  if (i == n) { return 0; }
+  var v: uint32 = (uint32)p[i];
+  var b: uint32 = 0;
+  while (v != 0) { v = v >> 1; b = b + 1; }
+  return (uint32)(n - i - 1) * 8 + b;
+}
+
+// The encoded bit length for a plain bit length.
+fn encoded_bits(bl: uint32) -> uint32 {
+  if (bl == 0) { return 0; }
+  return (((bl - 1) / 31) << 5) + ((bl - 1) % 31) + 1;
+}
+
+// Sets an integer to a hex value with the encoded bit length of the modulus
+// (so that it takes the modulus' number of words).
+fn load_sized(x: uint32*, hex: string, modbits: uint32) {
+  var buf: uint8[300];
+  var n: int64 = tc_unhex(hex, &buf[0], 300);
+  var mlen: int64 = (int64)((modbits + 7) / 8);
+  for i in 0..I31_WORDS { x[i] = 0; }
+  if (n > mlen) {
+    // Value longer than the modulus: decode as is.
+    crx_i31_decode(x, &buf[0], n);
+  } else {
+    crx_i31_decode(x, &buf[0], n);
+  }
+}
+
+// Compares an integer with the expected hex value, ignoring leading zeros.
+fn same_value(x: uint32*, hex: string) -> bool {
+  var want: uint8[300];
+  var got: uint8[300];
+  var n: int64 = tc_unhex(hex, &want[0], 300);
+  for i in 0..300 { got[i] = 0; }
+  crx_i31_encode(&got[0], 300, x);
+  // got is the value zero-padded on the left to 300 bytes; want may be any
+  // length up to 300.
+  var pad: int64 = 300 - n;
+  for i in 0..pad {
+    if (got[i] != 0) { return false; }
+  }
+  if (n == 0) { return true; }
+  return cr_equal(&got[pad], &want[0], n);
+}
+
+fn i31_row(r: int32, row: string) {
+  var op: string = tc_field(row, 0);
+  var label: string = "i31 row {r} {op}";
+  var mb: uint8[300];
+  var ab: uint8[300];
+  var bb: uint8[300];
+  var eb: uint8[300];
+  var ml: int64 = tc_unhex(tc_field(row, 1), &mb[0], 300);
+  var al: int64 = tc_unhex(tc_field(row, 2), &ab[0], 300);
+  var bl: int64 = tc_unhex(tc_field(row, 3), &bb[0], 300);
+  var el: int64 = tc_unhex(tc_field(row, 4), &eb[0], 300);
+  var want: string = tc_field(row, 5);
+  var m: uint32[80];
+  var x: uint32[80];
+  var y: uint32[80];
+  var d: uint32[160];
+  var t1: uint32[160];
+  var t2: uint32[160];
+  var t3: uint32[240];
+  var m0i: uint32 = 0;
+  if (ml > 0) {
+    crx_i31_decode(&m[0], &mb[0], ml);
+    m0i = crx_i31_ninv31(m[1]);
+  }
+
+  if (op == "rshift") {
+    // Checked on its own further down (see "rshift").
+    return;
+  }
+  if (op == "decode") {
+    // a is decoded and encoded back into the requested length.
+    crx_i31_decode(&x[0], &ab[0], al);
+    tc_ok(label + " bit length", x[0] == encoded_bits(bits_of(&ab[0], al)));
+    tc_ok(label, same_value(&x[0], want));
+  } else if (op == "decode_reduce") {
+    crx_i31_decode_reduce(&x[0], &ab[0], al, &m[0]);
+    tc_ok(label + " size", x[0] == m[0]);
+    tc_ok(label, same_value(&x[0], want));
+  } else if (op == "decode_mod") {
+    // expected is "v" + value or "i".
+    var rc: uint32 = crx_i31_decode_mod(&x[0], &ab[0], al, &m[0]);
+    if (want == "i") {
+      tc_ok(label + " rejected", rc == 0);
+      tc_ok(label + " zeroed", crx_i31_iszero(&x[0]) == 1);
+    } else {
+      tc_ok(label + " accepted", rc == 1);
+      tc_ok(label, same_value(&x[0], want));
+    }
+  } else if (op == "add" || op == "sub") {
+    // a and b share the size of the modulus; the carry is the last char of
+    // the expected field's partner row, folded into want as value|carry.
+    var carry: string = tc_field(row, 4);
+    crx_i31_decode_reduce(&x[0], &ab[0], al, &m[0]);
+    crx_i31_decode_reduce(&y[0], &bb[0], bl, &m[0]);
+    var c: uint32 = 0;
+    if (op == "add") {
+      c = crx_i31_add(&x[0], &y[0], 1);
+    } else {
+      c = crx_i31_sub(&x[0], &y[0], 1);
+    }
+    tc_ok(label, same_value(&x[0], want));
+    tc_ok(label + " carry", (carry == "1" && c == 1) || (carry == "0" && c == 0));
+    // With ctl 0 nothing changes.
+    crx_i31_decode_reduce(&x[0], &ab[0], al, &m[0]);
+    var c0: uint32 = 0;
+    if (op == "add") {
+      c0 = crx_i31_add(&x[0], &y[0], 0);
+    } else {
+      c0 = crx_i31_sub(&x[0], &y[0], 0);
+    }
+    crx_i31_decode_reduce(&d[0], &ab[0], al, &m[0]);
+    var same: bool = true;
+    for i in 0..(int32)(((m[0] + 31) >> 5) + 1) {
+      if (x[i] != d[i]) { same = false; }
+    }
+    tc_ok(label + " ctl 0 keeps a", same && c0 == c);
+  } else if (op == "muladd_small") {
+    // a < m is multiplied by 2^31 and e (a 31-bit value in b) added.
+    crx_i31_decode_reduce(&x[0], &ab[0], al, &m[0]);
+    var zv: uint32 = 0;
+    for i in 0..bl { zv = (zv << 8) | (uint32)bb[i]; }
+    crx_i31_muladd_small(&x[0], zv, &m[0]);
+    tc_ok(label, same_value(&x[0], want));
+  } else if (op == "reduce") {
+    crx_i31_decode(&y[0], &ab[0], al);
+    crx_i31_reduce(&x[0], &y[0], &m[0]);
+    tc_ok(label + " size", x[0] == m[0]);
+    tc_ok(label, same_value(&x[0], want));
+  } else if (op == "mulacc") {
+    // d = a * b, with d zeroed to the sum of the sizes first.
+    crx_i31_decode(&x[0], &ab[0], al);
+    crx_i31_decode(&y[0], &bb[0], bl);
+    for i in 0..160 { d[i] = 0; }
+    crx_i31_mulacc(&d[0], &x[0], &y[0]);
+    tc_ok(label, same_value(&d[0], want));
+  } else if (op == "montymul") {
+    // montymul(a * R, b * R) * R^-1 = a * b * R: converting the product out
+    // gives a * b mod m.
+    crx_i31_decode_reduce(&x[0], &ab[0], al, &m[0]);
+    crx_i31_decode_reduce(&y[0], &bb[0], bl, &m[0]);
+    crx_i31_to_monty(&x[0], &m[0]);
+    crx_i31_to_monty(&y[0], &m[0]);
+    crx_i31_montymul(&d[0], &x[0], &y[0], &m[0], m0i);
+    crx_i31_from_monty(&d[0], &m[0], m0i);
+    tc_ok(label, same_value(&d[0], want));
+    // to_monty then from_monty is the identity.
+    crx_i31_decode_reduce(&x[0], &ab[0], al, &m[0]);
+    crx_i31_decode_reduce(&y[0], &ab[0], al, &m[0]);
+    crx_i31_to_monty(&x[0], &m[0]);
+    crx_i31_from_monty(&x[0], &m[0], m0i);
+    tc_ok(label + " monty round trip", same_value(&x[0], tc_field(row, 2)) || tc_all_zero(&ab[0], 0));
+  } else if (op == "modpow") {
+    crx_i31_decode_reduce(&x[0], &ab[0], al, &m[0]);
+    for i in 0..160 { t1[i] = 0; t2[i] = 0; }
+    crx_i31_modpow(&x[0], &eb[0], el, &m[0], m0i, &t1[0], &t2[0]);
+    tc_ok(label, same_value(&x[0], want));
+    // The windowed version gives the same result.
+    crx_i31_decode_reduce(&x[0], &ab[0], al, &m[0]);
+    tc_ok(label + " opt", crx_i31_modpow_opt(&x[0], &eb[0], el, &m[0], m0i, &t3[0], 240) == 1);
+    tc_ok(label + " opt value", same_value(&x[0], want));
+    // Too small a work area is refused and x is untouched.
+    crx_i31_decode_reduce(&x[0], &ab[0], al, &m[0]);
+    tc_ok(label + " opt without room", crx_i31_modpow_opt(&x[0], &eb[0], el, &m[0], m0i, &t3[0], 2) == 0);
+  } else if (op == "moddiv") {
+    // x = a / b mod m (m odd, b invertible).
+    crx_i31_decode_reduce(&x[0], &ab[0], al, &m[0]);
+    crx_i31_decode_reduce(&y[0], &bb[0], bl, &m[0]);
+    for i in 0..240 { t3[i] = 0; }
+    var ok: uint32 = crx_i31_moddiv(&x[0], &y[0], &m[0], m0i, &t3[0]);
+    if (want == "i") {
+      tc_ok(label + " not invertible", ok == 0);
+    } else {
+      tc_ok(label + " invertible", ok == 1);
+      tc_ok(label, same_value(&x[0], want));
+    }
+  } else {
+    tc_ok(label + " known operation", false);
+  }
+}
+
+fn i31_numbers() {
+  // ninv31: -1/x mod 2^31 for odd x, 0 for even x.
+  var odds: uint32[6] = [(uint32)1, (uint32)3, (uint32)0x7FFFFFFF, (uint32)0x12345679, (uint32)0x40000001, (uint32)0xFFFFFFFD];
+  for i in 0..6 {
+    var inv: uint32 = crx_i31_ninv31(odds[i]);
+    tc_ok("ninv31 {odds[i]}", ((odds[i] * inv) + 1) % 2147483648 == 0 && inv < 2147483648);
+  }
+  tc_ok("ninv31 of an even value", crx_i31_ninv31(10) == 0);
+
+  // Constant-time comparisons and selection at the edges of the range.
+  var vals: uint32[7] = [(uint32)0, (uint32)1, (uint32)0x7FFFFFFF, (uint32)0x80000000, (uint32)0x80000001, (uint32)0xFFFFFFFE, (uint32)0xFFFFFFFF];
+  var bad: int32 = 0;
+  for i in 0..7 {
+    for j in 0..7 {
+      var x: uint32 = vals[i];
+      var y: uint32 = vals[j];
+      var gt: uint32 = 0;
+      var eq: uint32 = 0;
+      if (x > y) { gt = 1; }
+      if (x == y) { eq = 1; }
+      if (crx_ct_gt(x, y) != gt) { bad = bad + 1; }
+      if (crx_ct_eq(x, y) != eq) { bad = bad + 1; }
+      if (crx_ct_neq(x, y) != 1 - eq) { bad = bad + 1; }
+      if (crx_ct_ge(x, y) != 1 - (1 - gt - eq)) { bad = bad + 1; }
+      if (crx_ct_lt(x, y) != 1 - gt - eq) { bad = bad + 1; }
+      var c: int32 = 0;
+      if (x > y) { c = 1; }
+      if (x < y) { c = -1; }
+      if (crx_ct_cmp(x, y) != c) { bad = bad + 1; }
+      if (crx_ct_mux(1, x, y) != x || crx_ct_mux(0, x, y) != y) { bad = bad + 1; }
+    }
+  }
+  tc_ok("ct comparisons", bad == 0);
+  var bl: uint32[6] = [(uint32)0, (uint32)1, (uint32)2, (uint32)0xFF, (uint32)0x100, (uint32)0xFFFFFFFF];
+  var bw: uint32[6] = [(uint32)0, (uint32)1, (uint32)2, (uint32)8, (uint32)9, (uint32)32];
+  var bbad: int32 = 0;
+  for i in 0..6 {
+    if (crx_ct_bit_length32(bl[i]) != bw[i]) { bbad = bbad + 1; }
+  }
+  tc_ok("bit length of a word", bbad == 0);
+  tc_ok("eq0", crx_ct_eq0(0) == 1 && crx_ct_eq0(1) == 0 && crx_ct_eq0(-1) == 0);
+
+  // 64 by 32 bit division: (hi:lo) / d with hi <= d.
+  var hi: uint32[5] = [(uint32)0, (uint32)1, (uint32)0x7FFFFFFF, (uint32)0x12345678, (uint32)0xFFFFFFFE];
+  var lo: uint32[5] = [(uint32)5, (uint32)0xFFFFFFFF, (uint32)0, (uint32)0x9ABCDEF0, (uint32)0xFFFFFFFF];
+  var dv: uint32[5] = [(uint32)3, (uint32)0xFFFFFFFF, (uint32)0x80000000, (uint32)0xFEDCBA98, (uint32)0xFFFFFFFF];
+  var dbad: int32 = 0;
+  for i in 0..5 {
+    var n: uint64 = ((uint64)hi[i] << 32) | (uint64)lo[i];
+    var q: uint64 = n / (uint64)dv[i];
+    var rem: uint64 = n % (uint64)dv[i];
+    if (q < ((uint64)1 << 32)) {
+      var r: uint32 = 0;
+      var got: uint32 = crx_divrem(hi[i], lo[i], dv[i], &r);
+      if ((uint64)got != q || (uint64)r != rem) { dbad = dbad + 1; }
+      if (crx_div(hi[i], lo[i], dv[i]) != got || crx_rem(hi[i], lo[i], dv[i]) != r) { dbad = dbad + 1; }
+    }
+  }
+  tc_ok("divrem", dbad == 0);
+
+  // rshift: a 100-bit value shifted by 1 .. 30 bits.
+  var buf: uint8[13];
+  for i in 0..13 { buf[i] = (uint8)(i * 37 + 11); }
+  var base: uint32[10];
+  crx_i31_decode(&base[0], &buf[0], 13);
+  var rbad: int32 = 0;
+  for s in 1..31 {
+    var v: uint32[10];
+    for i in 0..10 { v[i] = base[i]; }
+    crx_i31_rshift(&v[0], s);
+    // Compare with a big-endian shift done on the bytes.
+    var shifted: uint8[13];
+    var carry: uint32 = 0;
+    for i in 0..13 {
+      var cur: uint32 = (uint32)buf[i];
+      shifted[i] = (uint8)(((cur | (carry << 8)) >> (uint32)s) & 0xFF);
+      carry = 0;
+    }
+    // Long shift via 64-bit chunks is awkward on bytes; check the low word and
+    // the zero test instead.
+    var low: uint64 = 0;
+    for i in 5..13 { low = (low << 8) | (uint64)buf[i]; }
+    // The value's low 64 bits shifted right, joined with the bits above.
+    var hi5: uint64 = 0;
+    for i in 0..5 { hi5 = (hi5 << 8) | (uint64)buf[i]; }
+    var lowshift: uint64 = (low >> (uint64)s) | (hi5 << (uint64)(64 - s));
+    var gotlow: uint64 = (uint64)v[1] | ((uint64)v[2] << 31);
+    if ((gotlow & 0x3FFFFFFFFFFFFFFF) != (lowshift & 0x3FFFFFFFFFFFFFFF)) { rbad = rbad + 1; }
+  }
+  tc_ok("rshift", rbad == 0);
+}
+
+fn i31_rows() {
+  for r in 0..VEC_I31_N {
+    i31_row(r, VEC_I31[r]);
+  }
+}
+
+fn main() -> int32 {
+  keypair_rows();
+  ecdh_rows();
+  pkv_rows();
+  wycheproof_rows();
+  round_trips();
+  scalar_edges();
+  peer_edges();
+  argument_errors();
+  internal_points();
+  i31_numbers();
+  i31_rows();
+  return tc_finish("p256");
+}

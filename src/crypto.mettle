@@ -20,7 +20,9 @@
 //              (RFC 8439); gcm: cr_aes_gcm_* (AES-128/256-GCM, NIST SP 800-38D);
 //              chacha, poly1305, aes and ghash are internal
 //   ecc/       kx: cr_x25519_*, cr_kx_* (RFC 7748); sign: cr_ed25519_*
-//              (RFC 8032); curve25519 is internal
+//              (RFC 8032); p256: cr_p256_* (key pairs and ECDH on NIST
+//              P-256, FIPS 186-5); curve25519 and i31 (big integers) are
+//              internal
 //   password/  pwhash: cr_pwhash_* (Argon2id, RFC 9106); argon2 is internal
 //   recipes/   signed (signed values), token (tokens and recovery codes),
 //              seal (cr_seal, cr_open), totp (2FA codes, RFC 4226 and 6238)
@@ -38,6 +40,7 @@ import "crypto/cipher/aead";
 import "crypto/cipher/gcm";
 import "crypto/ecc/kx";
 import "crypto/ecc/sign";
+import "crypto/ecc/p256";
 import "crypto/core/encode";
 import "crypto/recipes/signed";
 import "crypto/recipes/token";
