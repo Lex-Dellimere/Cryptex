@@ -46,6 +46,16 @@ export struct CrSha256 {
   b: uint8[32];
 }
 
+/// CrSha384: A SHA-384 digest.
+/// in: - (zeroed when declared: `var x: CrSha384;`)
+/// returns: -
+/// owns: public
+/// thread: any thread (no shared state)
+/// example: var d: CrSha384; cr_sha384(&d, msg, len);
+export struct CrSha384 {
+  b: uint8[48];
+}
+
 /// CrSha512: A SHA-512 digest.
 /// in: - (zeroed when declared: `var x: CrSha512;`)
 /// returns: -
@@ -64,6 +74,16 @@ export struct CrSha512 {
 /// example: var t: CrHmacSha256; cr_hmac_sha256(&t, key, klen, msg, mlen);
 export struct CrHmacSha256 {
   b: uint8[32];
+}
+
+/// CrHmacSha384: An HMAC-SHA384 tag.
+/// in: - (zeroed when declared: `var x: CrHmacSha384;`)
+/// returns: -
+/// owns: public, but compare it only with cr_hmac_sha384_verify or cr_equal
+/// thread: any thread (no shared state)
+/// example: var t: CrHmacSha384; cr_hmac_sha384(&t, key, klen, msg, mlen);
+export struct CrHmacSha384 {
+  b: uint8[48];
 }
 
 /// CrHmacSha512: An HMAC-SHA512 tag.

@@ -1,0 +1,226 @@
+// SHA-384, HMAC-SHA384 and HKDF-SHA384: the FIPS 180-4 "abc" example, NIST CAVP
+// SHA-384 and HMAC rows (tests/vectors/vec_cavp_sha384.mettle,
+// vec_cavp_hmac_sha384.mettle), and Wycheproof HMAC-SHA384 and HKDF-SHA384
+// (vec_wp_hmac_sha384.mettle, vec_wp_hkdf_sha384.mettle).
+import "crypto/crypto";
+import "crypto/hash/sha2";
+import "tcheck";
+import "vectors/vec_cavp_sha384";
+import "vectors/vec_cavp_hmac_sha384";
+import "vectors/vec_wp_hmac_sha384";
+import "vectors/vec_wp_hkdf_sha384";
+
+// Parses an unpadded lowercase hex number.
+fn s384_parse_hex_int(s: string) -> int64 {
+  var v: int64 = 0;
+  var i: int64 = 0;
+  while (i < (int64)s.length) {
+    var c: int32 = (int32)s.chars[i];
+    var d: int32 = c - 48;
+    if (c >= 97) { d = c - 97 + 10; }
+    v = v * 16 + (int64)d;
+    i = i + 1;
+  }
+  return v;
+}
+
+// Compares the first tlen bytes of the computed tag with the expected tag.
+fn s384_tag_check(label: string, full: uint8*, fulllen: int64, want: uint8*, tlen: int64, e: string) {
+  var same: bool = false;
+  if (tlen >= 0 && tlen <= fulllen) {
+    same = cr_equal(full, want, tlen);
+  }
+  tc_ok(label + " (" + e + ")", same == (e == "v"));
+}
+
+// Streams msg into a fresh state in pieces of the given size and checks the digest.
+fn s384_stream(label: string, msg: uint8*, n: int64, piece: int64, want: string) {
+  var st: CrSha384State;
+  var d: CrSha384;
+  tc_rc(label + " init", cr_sha384_init(&st), CR_OK);
+  var pos: int64 = 0;
+  while (pos < n) {
+    var k: int64 = n - pos;
+    if (k > piece) { k = piece; }
+    tc_rc(label + " update", cr_sha384_update(&st, &msg[pos], k), CR_OK);
+    pos = pos + k;
+  }
+  tc_rc(label + " final", cr_sha384_final(&st, &d), CR_OK);
+  tc_hex_eq(label, &d.b[0], 48, want);
+  tc_ok(label + " state wiped", tc_all_zero((uint8*)&st, (int64)sizeof(CrSha384State)));
+}
+
+fn fips_abc() {
+  var d: CrSha384;
+  var abc: string = "abc";
+  var want: string = "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7";
+  tc_rc("abc rc", cr_sha384(&d, abc.chars, (int64)abc.length), CR_OK);
+  tc_hex_eq("abc", &d.b[0], 48, want);
+  s384_stream("abc streamed", abc.chars, (int64)abc.length, 1, want);
+
+  // Argument errors.
+  var e: CrSha384;
+  tc_rc("null out", cr_sha384(0, abc.chars, 3), CR_E_ARG);
+  tc_rc("null msg", cr_sha384(&e, 0, 3), CR_E_ARG);
+  tc_rc("negative length", cr_sha384(&e, abc.chars, -1), CR_E_ARG);
+  tc_rc("empty msg with null pointer", cr_sha384(&e, 0, 0), CR_OK);
+  tc_hex_eq("empty", &e.b[0], 48,
+    "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b");
+  var st: CrSha384State;
+  tc_rc("init null", cr_sha384_init(0), CR_E_ARG);
+  tc_rc("update null st", cr_sha384_update(0, abc.chars, 3), CR_E_ARG);
+  tc_rc("final null st", cr_sha384_final(0, &e), CR_E_ARG);
+  cr_sha384_init(&st);
+  cr_sha384_update(&st, abc.chars, 3);
+  tc_rc("final null out", cr_sha384_final(&st, 0), CR_E_ARG);
+  tc_ok("final null out wipes", tc_all_zero((uint8*)&st, (int64)sizeof(CrSha384State)));
+}
+
+fn cavp_sha384() {
+  var msg: uint8[2000];
+  var rows: int32 = 0;
+  for r in 0..VEC_CAVP_SHA384_N {
+    var row: string = VEC_CAVP_SHA384[r];
+    var label: string = "sha384 row {r}";
+    var n: int64 = tc_unhex(tc_field(row, 0), &msg[0], 2000);
+    tc_ok(label + " decoded", n >= 0);
+    var want: string = tc_field(row, 1);
+    var d: CrSha384;
+    tc_rc(label + " rc", cr_sha384(&d, &msg[0], n), CR_OK);
+    tc_hex_eq(label, &d.b[0], 48, want);
+    s384_stream(label + " by 1", &msg[0], n, 1, want);
+    s384_stream(label + " by 7", &msg[0], n, 7, want);
+    s384_stream(label + " by 128", &msg[0], n, 128, want);
+    s384_stream(label + " by 1000", &msg[0], n, 1000, want);
+    rows = rows + 1;
+  }
+  tc_ok("sha384 row count", rows == VEC_CAVP_SHA384_N);
+}
+
+// key|msg|mac, where mac may be a truncation of the tag.
+fn cavp_hmac_sha384() {
+  var key: uint8[160];
+  var msg: uint8[160];
+  var want: uint8[48];
+  var rows: int32 = 0;
+  for r in 0..VEC_CAVP_HMAC_SHA384_N {
+    var row: string = VEC_CAVP_HMAC_SHA384[r];
+    var label: string = "cavp hmac_sha384 row {r}";
+    var klen: int64 = tc_unhex(tc_field(row, 0), &key[0], 160);
+    var mlen: int64 = tc_unhex(tc_field(row, 1), &msg[0], 160);
+    var tlen: int64 = tc_unhex(tc_field(row, 2), &want[0], 48);
+    tc_ok(label + " decoded", klen >= 0 && mlen >= 0 && tlen >= 1);
+    var full: CrHmacSha384;
+    tc_rc(label + " rc", cr_hmac_sha384(&full, &key[0], klen, &msg[0], mlen), CR_OK);
+    tc_ok(label, tlen >= 1 && cr_equal(&full.b[0], &want[0], tlen));
+
+    // Streamed in two uneven parts.
+    var h: int64 = mlen / 3;
+    var st: CrHmacSha384State;
+    var t2: CrHmacSha384;
+    tc_rc(label + " init", cr_hmac_sha384_init(&st, &key[0], klen), CR_OK);
+    tc_rc(label + " upd1", cr_hmac_sha384_update(&st, &msg[0], h), CR_OK);
+    tc_rc(label + " upd2", cr_hmac_sha384_update(&st, &msg[h], mlen - h), CR_OK);
+    tc_rc(label + " final", cr_hmac_sha384_final(&st, &t2), CR_OK);
+    tc_ok(label + " streamed", cr_equal(&t2.b[0], &full.b[0], 48));
+    tc_ok(label + " state wiped", tc_all_zero(cr_hmac_sha384_state_bytes(&st), 512));
+
+    // Verify accepts the tag and rejects a flipped bit.
+    tc_ok(label + " verify", cr_hmac_sha384_verify(&full, &key[0], klen, &msg[0], mlen));
+    var bit: int32 = (r * 5) % 48;
+    full.b[bit] = full.b[bit] ^ (uint8)(1 << (r % 8));
+    tc_ok(label + " flipped", !cr_hmac_sha384_verify(&full, &key[0], klen, &msg[0], mlen));
+    rows = rows + 1;
+  }
+  tc_ok("cavp hmac_sha384 row count", rows == VEC_CAVP_HMAC_SHA384_N);
+}
+
+// key|msg|tag|v-or-i: the (possibly truncated) tag must be a prefix exactly for "v".
+fn wp_hmac_sha384() {
+  var key: uint8[96];
+  var msg: uint8[288];
+  var want: uint8[96];
+  var full: CrHmacSha384;
+  var rows: int32 = 0;
+  for r in 0..VEC_WP_HMAC_SHA384_N {
+    var row: string = VEC_WP_HMAC_SHA384[r];
+    var label: string = "wp hmac_sha384 row {r}";
+    var klen: int64 = tc_unhex(tc_field(row, 0), &key[0], 96);
+    var mlen: int64 = tc_unhex(tc_field(row, 1), &msg[0], 288);
+    var tlen: int64 = tc_unhex(tc_field(row, 2), &want[0], 96);
+    tc_ok(label + " decoded", klen >= 0 && mlen >= 0 && tlen >= 0);
+    tc_rc(label + " rc", cr_hmac_sha384(&full, &key[0], klen, &msg[0], mlen), CR_OK);
+    s384_tag_check(label, &full.b[0], 48, &want[0], tlen, tc_field(row, 3));
+    rows = rows + 1;
+  }
+  tc_ok("wp hmac_sha384 row count", rows == VEC_WP_HMAC_SHA384_N);
+}
+
+// ikm|salt|info|size_hex|okm|v-or-i
+fn wp_hkdf_sha384() {
+  var ikm: uint8[128];
+  var salt: uint8[128];
+  var info: uint8[128];
+  var out: uint8[12240];
+  var want: uint8[12240];
+  var rows: int32 = 0;
+  for r in 0..VEC_WP_HKDF_SHA384_N {
+    var row: string = VEC_WP_HKDF_SHA384[r];
+    var label: string = "wp hkdf_sha384 row {r}";
+    var e: string = tc_field(row, 5);
+    var il: int64 = tc_unhex(tc_field(row, 0), &ikm[0], 128);
+    var sl: int64 = tc_unhex(tc_field(row, 1), &salt[0], 128);
+    var nl: int64 = tc_unhex(tc_field(row, 2), &info[0], 128);
+    tc_ok(label + " decoded", il >= 0 && sl >= 0 && nl >= 0);
+    var size: int64 = s384_parse_hex_int(tc_field(row, 3));
+    tc_fill(&out[0], 12240, 255);
+    if (e == "v") {
+      var wl: int64 = tc_unhex(tc_field(row, 4), &want[0], 12240);
+      tc_ok(label + " okm decoded", wl == size && size >= 1 && size <= 12240);
+      tc_rc(label + " rc", cr_hkdf_sha384(&out[0], size, &salt[0], sl, &ikm[0], il, &info[0], nl), CR_OK);
+      tc_ok(label + " okm", cr_equal(&out[0], &want[0], size));
+    } else {
+      tc_ok(label + " size over the limit", size > 12240);
+      tc_rc(label + " rc (invalid)", cr_hkdf_sha384(&out[0], size, &salt[0], sl, &ikm[0], il, &info[0], nl), CR_E_ARG);
+    }
+    rows = rows + 1;
+  }
+  tc_ok("wp hkdf_sha384 row count", rows == VEC_WP_HKDF_SHA384_N);
+}
+
+// Extract + expand agree with the one-shot call, and the constants and
+// argument errors match the SHA-256 versions.
+fn hkdf_sha384_api() {
+  tc_ok("prk bytes", CR_HKDF_SHA384_PRK_BYTES == 48);
+  tc_ok("max", CR_HKDF_SHA384_MAX == 12240);
+  var ikm: uint8[22];
+  tc_fill(&ikm[0], 22, 11);
+  var salt: uint8[13];
+  tc_fill(&salt[0], 13, 7);
+  var info: uint8[10];
+  tc_fill(&info[0], 10, 9);
+  var prk: uint8[48];
+  var okm: uint8[100];
+  var one: uint8[100];
+  tc_rc("extract", cr_hkdf_sha384_extract(&prk[0], &salt[0], 13, &ikm[0], 22), CR_OK);
+  tc_rc("expand", cr_hkdf_sha384_expand(&okm[0], 100, &prk[0], 48, &info[0], 10), CR_OK);
+  tc_rc("one-shot", cr_hkdf_sha384(&one[0], 100, &salt[0], 13, &ikm[0], 22, &info[0], 10), CR_OK);
+  tc_ok("one-shot equals extract+expand", cr_equal(&okm[0], &one[0], 100));
+  tc_rc("expand outlen 0", cr_hkdf_sha384_expand(&okm[0], 0, &prk[0], 48, &info[0], 10), CR_E_ARG);
+  tc_rc("expand short prk", cr_hkdf_sha384_expand(&okm[0], 10, &prk[0], 47, &info[0], 10), CR_E_ARG);
+  tc_rc("expand null prk", cr_hkdf_sha384_expand(&okm[0], 10, 0, 48, &info[0], 10), CR_E_ARG);
+  tc_rc("extract null prk", cr_hkdf_sha384_extract(0, &salt[0], 13, &ikm[0], 22), CR_E_ARG);
+  tc_rc("extract null salt", cr_hkdf_sha384_extract(&prk[0], 0, 13, &ikm[0], 22), CR_E_ARG);
+  tc_ok("failed extract wipes prk", tc_all_zero(&prk[0], 48));
+  tc_rc("empty salt and ikm", cr_hkdf_sha384_extract(&prk[0], 0, 0, 0, 0), CR_OK);
+}
+
+fn main() -> int32 {
+  fips_abc();
+  cavp_sha384();
+  cavp_hmac_sha384();
+  wp_hmac_sha384();
+  wp_hkdf_sha384();
+  hkdf_sha384_api();
+  return tc_finish("sha384");
+}

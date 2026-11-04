@@ -248,6 +248,24 @@ A SHA-256 digest.
 var d: CrSha256; cr_sha256(&d, msg, len);
 ```
 
+### CrSha384
+
+```mettle
+export struct CrSha384 {
+  b: uint8[48];
+}
+```
+
+A SHA-384 digest.
+
+- **in:** - (zeroed when declared: `var x: CrSha384;`)
+- **owns:** public
+- **thread:** any thread (no shared state)
+
+```mettle
+var d: CrSha384; cr_sha384(&d, msg, len);
+```
+
 ### CrSha512
 
 ```mettle
@@ -282,6 +300,24 @@ An HMAC-SHA256 tag.
 
 ```mettle
 var t: CrHmacSha256; cr_hmac_sha256(&t, key, klen, msg, mlen);
+```
+
+### CrHmacSha384
+
+```mettle
+export struct CrHmacSha384 {
+  b: uint8[48];
+}
+```
+
+An HMAC-SHA384 tag.
+
+- **in:** - (zeroed when declared: `var x: CrHmacSha384;`)
+- **owns:** public, but compare it only with cr_hmac_sha384_verify or cr_equal
+- **thread:** any thread (no shared state)
+
+```mettle
+var t: CrHmacSha384; cr_hmac_sha384(&t, key, klen, msg, mlen);
 ```
 
 ### CrHmacSha512
@@ -659,7 +695,7 @@ var raw: uint8[32]; var rl: int64; cr_base64url_decode(&raw[0], 32, &rl, t.chars
 
 ## hash/hash
 
-Hashes: SHA-256, SHA-512 (FIPS 180-4, sha2) and BLAKE2b (RFC 7693, blake2b), all pure Mettle.
+Hashes: SHA-256, SHA-384, SHA-512 (FIPS 180-4, sha2) and BLAKE2b (RFC 7693, blake2b), all pure Mettle.
 
 ### CR_BLAKE2B_MIN
 
@@ -726,6 +762,23 @@ Computes SHA-256 of n bytes (FIPS 180-4).
 var d: CrSha256; cr_sha256(&d, s.chars, (int64)s.length);
 ```
 
+### cr_sha384
+
+```mettle
+export fn cr_sha384(out: CrSha384*, msg: uint8*, n: int64) -> int32
+```
+
+Computes SHA-384 of n bytes (FIPS 180-4).
+
+- **in:** out; msg readable for n bytes (may be 0 when n == 0); n >= 0
+- **returns:** CR_OK; CR_E_ARG (null out, null msg with n > 0, n < 0). On error out is not written
+- **owns:** nothing; the caller owns out and msg
+- **thread:** any thread (no shared state)
+
+```mettle
+var d: CrSha384; cr_sha384(&d, s.chars, (int64)s.length);
+```
+
 ### cr_sha512
 
 ```mettle
@@ -775,6 +828,23 @@ Streaming SHA-256 state. Treat as opaque: only cr_sha256_init, _update and _fina
 
 ```mettle
 var st: CrSha256State; cr_sha256_init(&st);
+```
+
+### CrSha384State
+
+```mettle
+export struct CrSha384State {
+  s: CrxSha384;
+}
+```
+
+Streaming SHA-384 state. Treat as opaque: only cr_sha384_init, _update and _final touch it. The caller provides the memory.
+
+- **owns:** the caller owns the state; _final wipes it; to abandon a hash early wipe it with cr_wipe((uint8*)st, (int64)sizeof(CrSha384State))
+- **thread:** any thread (no shared state); one thread per state
+
+```mettle
+var st: CrSha384State; cr_sha384_init(&st);
 ```
 
 ### CrSha512State
@@ -860,6 +930,57 @@ Finishes a streaming SHA-256 hash and writes the digest. Always wipes st, also o
 
 ```mettle
 var d: CrSha256; cr_sha256_final(&st, &d);
+```
+
+### cr_sha384_init
+
+```mettle
+export fn cr_sha384_init(st: CrSha384State*) -> int32
+```
+
+Starts a streaming SHA-384 hash (FIPS 180-4). Feed data with cr_sha384_update, finish with cr_sha384_final.
+
+- **in:** st writable state
+- **returns:** CR_OK; CR_E_ARG (null st)
+- **owns:** the caller owns st; _final wipes it, or abandon it with cr_wipe((uint8*)st, (int64)sizeof(CrSha384State))
+- **thread:** any thread (no shared state)
+
+```mettle
+var st: CrSha384State; cr_sha384_init(&st);
+```
+
+### cr_sha384_update
+
+```mettle
+export fn cr_sha384_update(st: CrSha384State*, msg: uint8*, n: int64) -> int32
+```
+
+Feeds n bytes into a streaming SHA-384 hash. Any split of the input gives the same digest as cr_sha384 over the whole.
+
+- **in:** st initialised by cr_sha384_init; msg readable for n bytes (may be 0 when n == 0); n >= 0
+- **returns:** CR_OK; CR_E_ARG (null st, null msg with n > 0, n < 0). On error the state is unchanged
+- **owns:** the caller owns st and msg
+- **thread:** any thread (no shared state)
+
+```mettle
+cr_sha384_update(&st, buf, (int64)got);
+```
+
+### cr_sha384_final
+
+```mettle
+export fn cr_sha384_final(st: CrSha384State*, out: CrSha384*) -> int32
+```
+
+Finishes a streaming SHA-384 hash and writes the digest. Always wipes st, also on error.
+
+- **in:** st initialised by cr_sha384_init; out writable
+- **returns:** CR_OK; CR_E_ARG (null st or out). With a null out and a non-null st the state is wiped and nothing is written
+- **owns:** the caller owns st and out; st is wiped
+- **thread:** any thread (no shared state)
+
+```mettle
+var d: CrSha384; cr_sha384_final(&st, &d);
 ```
 
 ### cr_sha512_init
@@ -966,7 +1087,7 @@ var d: uint8[32]; cr_blake2b_final(&st, &d[0], 32);
 
 ## mac/mac
 
-HMAC-SHA256 and HMAC-SHA512 (RFC 2104, FIPS 198-1) with keys of any length, in pure Mettle on top of sha2. The state keeps two running hashes (inner, outer) that were primed with the key pads, so no key copy stays around. Verification is constant time (cr_equal).
+HMAC-SHA256, HMAC-SHA384 and HMAC-SHA512 (RFC 2104, FIPS 198-1) with keys of any length, in pure Mettle on top of sha2. The state keeps two running hashes (inner, outer) that were primed with the key pads, so no key copy stays around. Verification is constant time (cr_equal).
 
 ### CrHmacSha256State
 
@@ -1086,6 +1207,126 @@ Checks an HMAC-SHA256 tag in constant time: recomputes the tag and compares with
 
 ```mettle
 if (!cr_hmac_sha256_verify(&t, &k[0], 32, m.chars, (int64)m.length)) { reject(); }
+```
+
+### CrHmacSha384State
+
+```mettle
+export struct CrHmacSha384State {
+  st: uint64[64];
+}
+```
+
+an incremental HMAC-SHA384 computation. Use one state per computation (held in caller memory; 512 bytes reserved, the inner and outer hash contexts use 416).
+
+- **in:** - (initialize with cr_hmac_sha384_init before use)
+- **owns:** secret (it holds key-derived hash contexts): cr_hmac_sha384_final wipes it; if you abandon a computation, call cr_wipe(cr_hmac_sha384_state_bytes(&st), 512)
+- **thread:** any thread (no shared state)
+
+```mettle
+var st: CrHmacSha384State; cr_hmac_sha384_init(&st, k, klen);
+```
+
+### cr_hmac_sha384_state_bytes
+
+```mettle
+export fn cr_hmac_sha384_state_bytes(st: CrHmacSha384State*) -> uint8*
+```
+
+Gives the address of a state's storage, for cr_wipe.
+
+- **in:** st
+- **returns:** a pointer to its 512 bytes (0 if st is 0)
+- **owns:** the pointer borrows st; it is caller memory
+- **thread:** any thread (no shared state)
+
+```mettle
+cr_wipe(cr_hmac_sha384_state_bytes(&st), 512);
+```
+
+### cr_hmac_sha384_init
+
+```mettle
+export fn cr_hmac_sha384_init(st: CrHmacSha384State*, key: uint8*, keylen: int64) -> int32
+```
+
+Starts an HMAC-SHA384 computation (RFC 2104 / FIPS 198-1) with a key of any length (longer than the block size it is hashed, as RFC 2104 says).
+
+- **in:** st; key readable for keylen bytes, keylen >= 0 (32+ random bytes recommended; key may be 0 only when keylen == 0)
+- **returns:** CR_OK; CR_E_ARG (null st, null key with keylen > 0, keylen < 0)
+- **owns:** st stays the caller's; the key is absorbed into st's hash contexts, so the caller may wipe its key right away
+- **thread:** any thread (no shared state)
+
+```mettle
+var st: CrHmacSha384State; cr_hmac_sha384_init(&st, &k[0], 32);
+```
+
+### cr_hmac_sha384_update
+
+```mettle
+export fn cr_hmac_sha384_update(st: CrHmacSha384State*, msg: uint8*, n: int64) -> int32
+```
+
+Feeds n more message bytes into an HMAC-SHA384 computation.
+
+- **in:** st from cr_hmac_sha384_init; msg readable for n bytes; n >= 0
+- **returns:** CR_OK; CR_E_ARG (null st, null msg with n > 0, n < 0)
+- **owns:** nothing new
+- **thread:** any thread (no shared state)
+
+```mettle
+cr_hmac_sha384_update(&st, part.chars, (int64)part.length);
+```
+
+### cr_hmac_sha384_final
+
+```mettle
+export fn cr_hmac_sha384_final(st: CrHmacSha384State*, out: CrHmacSha384*) -> int32
+```
+
+Finishes an HMAC-SHA384 computation, writes the tag and wipes the state.
+
+- **in:** st from cr_hmac_sha384_init; out
+- **returns:** CR_OK; CR_E_ARG (null st or out)
+- **owns:** st is wiped (start again with cr_hmac_sha384_init to reuse it)
+- **thread:** any thread (no shared state)
+
+```mettle
+var t: CrHmacSha384; cr_hmac_sha384_final(&st, &t);
+```
+
+### cr_hmac_sha384
+
+```mettle
+export fn cr_hmac_sha384(out: CrHmacSha384*, key: uint8*, keylen: int64, msg: uint8*, n: int64) -> int32
+```
+
+Computes HMAC-SHA384(key, msg) in one call (init + update + final), for a key of any length.
+
+- **in:** out; key/keylen as cr_hmac_sha384_init; msg/n as cr_hmac_sha384_update
+- **returns:** CR_OK; CR_E_ARG. On error out is left zeroed
+- **owns:** nothing; the temporary state is wiped
+- **thread:** any thread (no shared state)
+
+```mettle
+var t: CrHmacSha384; cr_hmac_sha384(&t, &k[0], 32, m.chars, (int64)m.length);
+```
+
+### cr_hmac_sha384_verify
+
+```mettle
+export fn cr_hmac_sha384_verify(tag: CrHmacSha384*, key: uint8*, keylen: int64, msg: uint8*, n: int64) -> bool
+```
+
+Checks an HMAC-SHA384 tag in constant time: recomputes the tag and compares with cr_equal.
+
+- **in:** tag, the received tag; key/keylen and msg/n as cr_hmac_sha384
+- **returns:** true only if the tag is valid; false for a wrong tag and for every error (fails closed)
+- **owns:** nothing; the recomputed tag is wiped
+- **thread:** any thread (no shared state)
+
+```mettle
+if (!cr_hmac_sha384_verify(&t, &k[0], 32, m.chars, (int64)m.length)) { reject(); }
 ```
 
 ### CrHmacSha512State
@@ -1210,7 +1451,7 @@ if (!cr_hmac_sha512_verify(&t, &k[0], 32, m.chars, (int64)m.length)) { reject();
 
 ## mac/kdf
 
-HKDF with HMAC-SHA256 (RFC 5869): extract a pseudorandom key from input keying material, expand it into output keying material. Pure Mettle on top of the streaming HMAC in mac. Loop bounds depend only on public lengths.
+HKDF with HMAC-SHA256 and HMAC-SHA384 (RFC 5869): extract a pseudorandom key from input keying material, expand it into output keying material. Pure Mettle on top of the streaming HMAC in mac. Loop bounds depend only on public lengths.
 
 ### CR_HKDF_SHA256_PRK_BYTES
 
@@ -1291,6 +1532,87 @@ HKDF-SHA256 in one call: extract with salt and ikm, then expand with info (RFC 5
 
 ```mettle
 var k: uint8[32]; cr_hkdf_sha256(&k[0], 32, &salt[0], 16, &ikm[0], 32, info.chars, (int64)info.length);
+```
+
+### CR_HKDF_SHA384_PRK_BYTES
+
+```mettle
+export const CR_HKDF_SHA384_PRK_BYTES: int64 = 48;
+```
+
+Size of a pseudorandom key made by cr_hkdf_sha384_extract (the HMAC-SHA384 output size).
+
+- **returns:** 48
+- **thread:** constant
+
+```mettle
+var prk: uint8[CR_HKDF_SHA384_PRK_BYTES];
+```
+
+### CR_HKDF_SHA384_MAX
+
+```mettle
+export const CR_HKDF_SHA384_MAX: int64 = 12240;
+```
+
+Largest output cr_hkdf_sha384_expand and cr_hkdf_sha384 can produce (255 * 48 bytes, RFC 5869 section 2.3).
+
+- **returns:** 12240
+- **thread:** constant
+
+```mettle
+if (n > CR_HKDF_SHA384_MAX) { return CR_E_ARG; }
+```
+
+### cr_hkdf_sha384_extract
+
+```mettle
+export fn cr_hkdf_sha384_extract(prk: uint8*, salt: uint8*, saltlen: int64, ikm: uint8*, ikmlen: int64) -> int32
+```
+
+HKDF-Extract (RFC 5869 section 2.2): prk = HMAC-SHA384(salt, ikm). An empty salt (0 with saltlen 0) acts as 48 zero bytes, as the RFC says.
+
+- **in:** prk, writable for 48 bytes; salt readable for saltlen bytes, saltlen >= 0 (random, but not secret; may be 0 only when saltlen == 0); ikm readable for ikmlen bytes, ikmlen >= 0 (may be 0 only when ikmlen == 0)
+- **returns:** CR_OK; CR_E_ARG (null prk, null salt with saltlen > 0, null ikm with ikmlen > 0, negative length); CR_E_INIT. On error prk is wiped
+- **owns:** prk stays the caller's and is secret: wipe it when done; nothing else is kept
+- **thread:** any thread (no shared state)
+
+```mettle
+var prk: uint8[48]; cr_hkdf_sha384_extract(&prk[0], &salt[0], 16, &ikm[0], 48);
+```
+
+### cr_hkdf_sha384_expand
+
+```mettle
+export fn cr_hkdf_sha384_expand(out: uint8*, outlen: int64, prk: uint8*, prklen: int64, info: uint8*, infolen: int64) -> int32
+```
+
+HKDF-Expand (RFC 5869 section 2.3): stretches a pseudorandom key into outlen bytes of output keying material, T(1) | T(2) | ... with T(i) = HMAC-SHA384(prk, T(i-1) | info | i).
+
+- **in:** out, writable for outlen bytes; outlen 1..12240 (CR_HKDF_SHA384_MAX); prk readable for prklen bytes, prklen >= 48 (normally the 48 bytes from cr_hkdf_sha384_extract); info readable for infolen bytes, infolen >= 0 (context, not secret; may be 0 only when infolen == 0)
+- **returns:** CR_OK; CR_E_ARG (null out or prk, outlen outside 1..12240, prklen < 48, null info with infolen > 0, negative infolen); CR_E_INIT. On error out is wiped (when out is non-null and outlen is in range)
+- **owns:** out stays the caller's and is secret; the temporary blocks and HMAC states are wiped
+- **thread:** any thread (no shared state)
+
+```mettle
+var k: uint8[48]; cr_hkdf_sha384_expand(&k[0], 48, &prk[0], 48, info.chars, (int64)info.length);
+```
+
+### cr_hkdf_sha384
+
+```mettle
+export fn cr_hkdf_sha384(out: uint8*, outlen: int64, salt: uint8*, saltlen: int64, ikm: uint8*, ikmlen: int64, info: uint8*, infolen: int64) -> int32
+```
+
+HKDF-SHA384 in one call: extract with salt and ikm, then expand with info (RFC 5869). Use it to derive one or more keys from a shared secret.
+
+- **in:** out, writable for outlen bytes; outlen 1..12240; salt/saltlen and ikm/ikmlen as cr_hkdf_sha384_extract; info/infolen as cr_hkdf_sha384_expand
+- **returns:** CR_OK; CR_E_ARG (as cr_hkdf_sha384_extract and cr_hkdf_sha384_expand); CR_E_INIT. On error out is wiped (when out is non-null and outlen is in range)
+- **owns:** out stays the caller's and is secret; the intermediate PRK is wiped
+- **thread:** any thread (no shared state)
+
+```mettle
+var k: uint8[48]; cr_hkdf_sha384(&k[0], 48, &salt[0], 16, &ikm[0], 48, info.chars, (int64)info.length);
 ```
 
 ## password/pwhash

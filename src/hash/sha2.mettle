@@ -1,9 +1,12 @@
-// SHA-256 and SHA-512 (FIPS 180-4) in pure Mettle: the incremental engines
-// behind cr_sha256, cr_sha512 and the HMAC functions. Internal module (crx_
+// SHA-256, SHA-384 and SHA-512 (FIPS 180-4) in pure Mettle: the incremental
+// engines behind cr_sha256, cr_sha384, cr_sha512 and the HMAC functions. Internal module (crx_
 // prefix): callers have already validated their arguments, these functions
 // do not. Words are loaded and stored big-endian with explicit shifts, all
 // arithmetic is on unsigned types and no index or branch depends on the
 // data, so the code is constant time for secret input.
+//
+// SHA-384 is SHA-512 with other initial values and the output cut to 48
+// bytes; it shares the SHA-512 compression.
 //
 // The SHA-512 round constants are stored as 32-bit halves (high, low) and
 // joined when used, because Mettle integer literals are 32-bit.
@@ -78,6 +81,13 @@ var g_crx_k512: uint32[160] = [
   (uint32)0x5fcb6fab, (uint32)0x3ad6faec, (uint32)0x6c44198c, (uint32)0x4a475817
 ];
 
+var g_crx_h384: uint32[16] = [
+  (uint32)0xcbbb9d5d, (uint32)0xc1059ed8, (uint32)0x629a292a, (uint32)0x367cd507,
+  (uint32)0x9159015a, (uint32)0x3070dd17, (uint32)0x152fecd8, (uint32)0xf70e5939,
+  (uint32)0x67332667, (uint32)0xffc00b31, (uint32)0x8eb44a87, (uint32)0x68581511,
+  (uint32)0xdb0c2e0d, (uint32)0x64f98fa7, (uint32)0x47b5481d, (uint32)0xbefa4fa4
+];
+
 var g_crx_h512: uint32[16] = [
   (uint32)0x6a09e667, (uint32)0xf3bcc908, (uint32)0xbb67ae85, (uint32)0x84caa73b,
   (uint32)0x3c6ef372, (uint32)0xfe94f82b, (uint32)0xa54ff53a, (uint32)0x5f1d36f1,
@@ -95,6 +105,14 @@ export struct CrxSha256 {
 
 /// internal: SHA-512 running state (chaining value, partial block, byte count).
 export struct CrxSha512 {
+  h: uint64[8];
+  buf: uint8[128];
+  buflen: int64;
+  total: uint64;
+}
+
+/// internal: SHA-384 running state (same layout as CrxSha512, which it shares).
+export struct CrxSha384 {
   h: uint64[8];
   buf: uint8[128];
   buflen: int64;
@@ -340,4 +358,31 @@ export fn crx_sha512_final(s: CrxSha512*, out: uint8*) {
     crx_store64be(&out[j * 8], s->h[j]);
   }
   cr_wipe((uint8*)s, (int64)sizeof(CrxSha512));
+}
+
+/// internal: starts a SHA-384 computation.
+export fn crx_sha384_init(s: CrxSha384*) {
+  for i in 0..8 {
+    s->h[i] = ((uint64)g_crx_h384[i * 2] << 32) | (uint64)g_crx_h384[i * 2 + 1];
+  }
+  for i in 0..128 {
+    s->buf[i] = 0;
+  }
+  s->buflen = 0;
+  s->total = 0;
+}
+
+/// internal: feeds n bytes into a SHA-384 computation.
+export fn crx_sha384_update(s: CrxSha384*, p: uint8*, n: int64) {
+  crx_sha512_update((CrxSha512*)s, p, n);
+}
+
+/// internal: finishes SHA-384: writes 48 bytes to out, then wipes s.
+export fn crx_sha384_final(s: CrxSha384*, out: uint8*) {
+  var full: uint8[64];
+  crx_sha512_final((CrxSha512*)s, &full[0]);
+  for i in 0..48 {
+    out[i] = full[i];
+  }
+  cr_wipe(&full[0], 64);
 }

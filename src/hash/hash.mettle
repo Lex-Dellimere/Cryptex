@@ -1,9 +1,9 @@
-// Hashes: SHA-256, SHA-512 (FIPS 180-4, sha2) and BLAKE2b (RFC 7693, blake2b),
+// Hashes: SHA-256, SHA-384, SHA-512 (FIPS 180-4, sha2) and BLAKE2b (RFC 7693, blake2b),
 // all pure Mettle.
 //
-// Each has a one-shot form (cr_sha256, cr_sha512, cr_blake2b) and a streaming
+// Each has a one-shot form (cr_sha256, cr_sha384, cr_sha512, cr_blake2b) and a streaming
 // form for files and streams: cr_<hash>_init, _update (any number of times)
-// and _final, on a caller-owned CrSha256State, CrSha512State or
+// and _final, on a caller-owned CrSha256State, CrSha384State, CrSha512State or
 // CrBlake2bState. _final always wipes the state.
 //
 // None of these is a password hash (use cr_pwhash_str) or a MAC (use
@@ -62,6 +62,22 @@ export fn cr_sha256(out: CrSha256*, msg: uint8*, n: int64) -> int32 {
   return CR_OK;
 }
 
+/// Computes SHA-384 of n bytes (FIPS 180-4).
+/// in: out; msg readable for n bytes (may be 0 when n == 0); n >= 0
+/// returns: CR_OK; CR_E_ARG (null out, null msg with n > 0, n < 0). On error
+///   out is not written
+/// owns: nothing; the caller owns out and msg
+/// thread: any thread (no shared state)
+/// example: var d: CrSha384; cr_sha384(&d, s.chars, (int64)s.length);
+export fn cr_sha384(out: CrSha384*, msg: uint8*, n: int64) -> int32 {
+  if (out == 0 || n < 0 || (msg == 0 && n > 0)) { return CR_E_ARG; }
+  var s: CrxSha384;
+  crx_sha384_init(&s);
+  crx_sha384_update(&s, msg, n);
+  crx_sha384_final(&s, &out->b[0]);
+  return CR_OK;
+}
+
 /// Computes SHA-512 of n bytes (FIPS 180-4).
 /// in: out; msg readable for n bytes (may be 0 when n == 0); n >= 0
 /// returns: CR_OK; CR_E_ARG (null out, null msg with n > 0, n < 0). On error
@@ -117,6 +133,18 @@ export fn cr_blake2b(out: uint8*, outlen: int64, msg: uint8*, n: int64, key: uin
 /// example: var st: CrSha256State; cr_sha256_init(&st);
 export struct CrSha256State {
   s: CrxSha256;
+}
+
+/// Streaming SHA-384 state. Treat as opaque: only cr_sha384_init, _update and
+/// _final touch it. The caller provides the memory.
+/// in: -
+/// returns: -
+/// owns: the caller owns the state; _final wipes it; to abandon a hash early
+///   wipe it with cr_wipe((uint8*)st, (int64)sizeof(CrSha384State))
+/// thread: any thread (no shared state); one thread per state
+/// example: var st: CrSha384State; cr_sha384_init(&st);
+export struct CrSha384State {
+  s: CrxSha384;
 }
 
 /// Streaming SHA-512 state. Treat as opaque: only cr_sha512_init, _update and
@@ -188,6 +216,53 @@ export fn cr_sha256_final(st: CrSha256State*, out: CrSha256*) -> int32 {
     return CR_E_ARG;
   }
   crx_sha256_final(&st->s, &out->b[0]);
+  return CR_OK;
+}
+
+/// Starts a streaming SHA-384 hash (FIPS 180-4). Feed data with
+/// cr_sha384_update, finish with cr_sha384_final.
+/// in: st writable state
+/// returns: CR_OK; CR_E_ARG (null st)
+/// owns: the caller owns st; _final wipes it, or abandon it with
+///   cr_wipe((uint8*)st, (int64)sizeof(CrSha384State))
+/// thread: any thread (no shared state)
+/// example: var st: CrSha384State; cr_sha384_init(&st);
+export fn cr_sha384_init(st: CrSha384State*) -> int32 {
+  if (st == 0) { return CR_E_ARG; }
+  crx_sha384_init(&st->s);
+  return CR_OK;
+}
+
+/// Feeds n bytes into a streaming SHA-384 hash. Any split of the input gives
+/// the same digest as cr_sha384 over the whole.
+/// in: st initialised by cr_sha384_init; msg readable for n bytes (may be 0
+///   when n == 0); n >= 0
+/// returns: CR_OK; CR_E_ARG (null st, null msg with n > 0, n < 0). On error
+///   the state is unchanged
+/// owns: the caller owns st and msg
+/// thread: any thread (no shared state)
+/// example: cr_sha384_update(&st, buf, (int64)got);
+export fn cr_sha384_update(st: CrSha384State*, msg: uint8*, n: int64) -> int32 {
+  if (st == 0 || n < 0 || (msg == 0 && n > 0)) { return CR_E_ARG; }
+  crx_sha384_update(&st->s, cr_hash_in(msg, n), n);
+  return CR_OK;
+}
+
+/// Finishes a streaming SHA-384 hash and writes the digest. Always wipes st,
+/// also on error.
+/// in: st initialised by cr_sha384_init; out writable
+/// returns: CR_OK; CR_E_ARG (null st or out). With a null out and a non-null
+///   st the state is wiped and nothing is written
+/// owns: the caller owns st and out; st is wiped
+/// thread: any thread (no shared state)
+/// example: var d: CrSha384; cr_sha384_final(&st, &d);
+export fn cr_sha384_final(st: CrSha384State*, out: CrSha384*) -> int32 {
+  if (st == 0) { return CR_E_ARG; }
+  if (out == 0) {
+    cr_wipe((uint8*)st, (int64)sizeof(CrSha384State));
+    return CR_E_ARG;
+  }
+  crx_sha384_final(&st->s, &out->b[0]);
   return CR_OK;
 }
 
