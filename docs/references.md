@@ -29,6 +29,7 @@ techniques from proven implementations. Nothing here is a new algorithm.
 |---|---|---|---|
 | AES (`src/cipher/aes.mettle`) | BearSSL `aes_ct64` | MIT | Bitsliced, constant time, no lookup tables, works on any 64-bit CPU. Table-based AES leaks the key through cache timing. |
 | GHASH (`src/cipher/ghash.mettle`) | BearSSL `ghash_ctmul64` | MIT | Carry-less multiply built from masked integer multiplies: constant time without PCLMULQDQ. |
+| AES-GCM with AES-NI and PCLMULQDQ (`src/cipher/aes_hw_x86_64.mettle`) | BearSSL `aes_x86ni`, `aes_x86ni_ctr`, `ghash_pclmul` | MIT | Hardware AES rounds and carry-less multiply: constant time and about 40 times faster. Chosen at run time with CPUID; the portable code above is the fallback. Instructions the Mettle assembler lacks are written as bytes taken from GNU as (Mettle report 113). |
 | P-256 (`src/ecc/p256.mettle`) | BearSSL `ec_p256_m31` | MIT | Curve-specific 30-bit limbs, constant-time windows and complete formulas; faster than BearSSL's generic code. |
 | P-384 (`src/ecc/p384.mettle`) | BearSSL `ec_prime_i31` | MIT | Generic constant-time prime-curve code on i31 integers; 2-bit window with constant-time selection. |
 | Big integers (`src/ecc/i31.mettle`) | BearSSL `i31` | MIT | Constant-time Montgomery arithmetic in 31-bit words, shared by ECDSA, P-384 and RSA. |

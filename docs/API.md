@@ -1941,7 +1941,7 @@ if (cr_chacha20poly1305_decrypt(&pt[0], 64, &plen, &ct[0], clen, 0, 0, &nonce, &
 
 ## cipher/gcm
 
-AES-128-GCM and AES-256-GCM (NIST SP 800-38D) with a 96-bit IV, in pure Mettle and constant time: bitsliced AES with no lookup tables (aes.mettle) and GHASH from masked 64-bit multiplications (ghash.mettle), both ported from BearSSL.
+AES-128-GCM and AES-256-GCM (NIST SP 800-38D) with a 96-bit IV, in pure Mettle and constant time: bitsliced AES with no lookup tables (aes.mettle) and GHASH from masked 64-bit multiplications (ghash.mettle), both ported from BearSSL. On an x86-64 CPU with AES-NI, PCLMULQDQ and SSSE3 (checked once, in cr_aes_gcm_init) the same GCM runs on the hardware instructions instead (aes_hw_x86_64.mettle, also ported from BearSSL); the output is identical and neither path has a secret-dependent branch or address.
 
 ### CrAesGcm
 
@@ -1951,10 +1951,12 @@ export struct CrAesGcm {
   h: uint8[16];
   rounds: uint32;
   ready: uint32;
+  hw: uint32;
+  rk: uint8[240];
 }
 ```
 
-An AES-128-GCM or AES-256-GCM key, ready for cr_aes_gcm_*: the expanded AES round keys and the GHASH key. Initialize it once with cr_aes_gcm_init and use it for any number of messages.
+An AES-128-GCM or AES-256-GCM key, ready for cr_aes_gcm_*: the expanded AES round keys (bitsliced, and for AES-NI when the CPU has it) and the GHASH key. Initialize it once with cr_aes_gcm_init and use it for any number of messages.
 
 - **in:** - (zeroed when declared: `var x: CrAesGcm;`; a zeroed context is not initialized and every use returns CR_E_ARG)
 - **owns:** secret: wipe with cr_aes_gcm_wipe(&ctx) when done
@@ -2021,7 +2023,7 @@ if (cr_aes_gcm_decrypt(&ctx, &pt[0], 64, &plen, &ct[0], clen, 0, 0, &nonce) != C
 export fn cr_aes_gcm_wipe(ctx: CrAesGcm*)
 ```
 
-Erases a CrAesGcm (round keys and GHASH key) and marks it uninitialized. Call it when the key is no longer needed.
+Erases a CrAesGcm (both forms of the round keys and the GHASH key) and marks it uninitialized. Call it when the key is no longer needed.
 
 - **in:** ctx, may be null (nothing happens)
 - **owns:** nothing; the caller still owns ctx

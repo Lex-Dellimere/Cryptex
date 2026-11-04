@@ -1,7 +1,10 @@
 // AES-128-GCM and AES-256-GCM (NIST SP 800-38D) with a 96-bit IV, in pure
 // Mettle and constant time: bitsliced AES with no lookup tables (aes.mettle)
 // and GHASH from masked 64-bit multiplications (ghash.mettle), both ported
-// from BearSSL.
+// from BearSSL. On an x86-64 CPU with AES-NI, PCLMULQDQ and SSSE3 (checked
+// once, in cr_aes_gcm_init) the same GCM runs on the hardware instructions
+// instead (aes_hw_x86_64.mettle, also ported from BearSSL); the output is
+// identical and neither path has a secret-dependent branch or address.
 //
 // The IV (a CrNonce12) must be unique per key: GCM is catastrophically
 // broken by reusing a key and IV pair, so never encrypt two messages with the
@@ -14,8 +17,10 @@ import "crypto/core/types";
 import "crypto/core/util";
 import "crypto/cipher/aes";
 import "crypto/cipher/ghash";
+import "crypto/cipher/aes_hw_x86_64" if x86_64;
+import "crypto/cipher/aes_hw_aarch64" if aarch64;
 
-/// CrAesGcm: An AES-128-GCM or AES-256-GCM key, ready for cr_aes_gcm_*: the expanded AES round keys and the GHASH key. Initialize it once with cr_aes_gcm_init and use it for any number of messages.
+/// CrAesGcm: An AES-128-GCM or AES-256-GCM key, ready for cr_aes_gcm_*: the expanded AES round keys (bitsliced, and for AES-NI when the CPU has it) and the GHASH key. Initialize it once with cr_aes_gcm_init and use it for any number of messages.
 /// in: - (zeroed when declared: `var x: CrAesGcm;`; a zeroed context is not initialized and every use returns CR_E_ARG)
 /// returns: -
 /// owns: secret: wipe with cr_aes_gcm_wipe(&ctx) when done
@@ -26,6 +31,8 @@ export struct CrAesGcm {
   h: uint8[16];
   rounds: uint32;
   ready: uint32;
+  hw: uint32;
+  rk: uint8[240];
 }
 
 // Largest message: 2^36 - 32 bytes (SP 800-38D: 2^32 - 2 counter blocks).
@@ -52,12 +59,19 @@ fn cr_aes_gcm_tag(tag: uint8*, ctx: CrAesGcm*, iv: uint8*, ad: uint8*, adlen: in
     y[i] = 0;
     i = i + 1;
   }
-  crx_ghash_ctmul64(&y[0], &ctx->h[0], ad, adlen);
-  crx_ghash_ctmul64(&y[0], &ctx->h[0], ct, clen);
   crx_st64be(&lens[0], (uint64)adlen << 3);
   crx_st64be(&lens[8], (uint64)clen << 3);
-  crx_ghash_ctmul64(&y[0], &ctx->h[0], &lens[0], 16);
-  crx_aes_ctr_xor(&ctx->skey[0], ctx->rounds, iv, 1, tag, &y[0], 16);
+  if (ctx->hw == 1) {
+    crx_ghash_hw(&y[0], &ctx->h[0], ad, adlen);
+    crx_ghash_hw(&y[0], &ctx->h[0], ct, clen);
+    crx_ghash_hw(&y[0], &ctx->h[0], &lens[0], 16);
+    crx_aes_hw_ctr_xor(&ctx->rk[0], ctx->rounds, iv, 1, &y[0], tag, 16);
+  } else {
+    crx_ghash_ctmul64(&y[0], &ctx->h[0], ad, adlen);
+    crx_ghash_ctmul64(&y[0], &ctx->h[0], ct, clen);
+    crx_ghash_ctmul64(&y[0], &ctx->h[0], &lens[0], 16);
+    crx_aes_ctr_xor(&ctx->skey[0], ctx->rounds, iv, 1, tag, &y[0], 16);
+  }
   cr_wipe(&y[0], 16);
   cr_wipe(&lens[0], 16);
 }
@@ -95,6 +109,10 @@ export fn cr_aes_gcm_init(ctx: CrAesGcm*, key: uint8*, keylen: int64) -> int32 {
   ctx->rounds = rounds;
   crx_aes_encrypt_block(&ctx->skey[0], rounds, &ctx->h[0], &zero[0]);
   cr_wipe((uint8*)&comp[0], 240);
+  ctx->hw = crx_aes_hw_available();
+  if (ctx->hw == 1) {
+    crx_aes_hw_expand(&ctx->rk[0], key, keylen);
+  }
   ctx->ready = 1;
   return CR_OK;
 }
@@ -125,7 +143,11 @@ export fn cr_aes_gcm_encrypt(ctx: CrAesGcm*, ct: uint8*, ct_cap: int64, ct_len: 
   if ((msg == 0 && mlen > 0) || (ad == 0 && adlen > 0)) { return CR_E_ARG; }
   if (ct_cap - CR_AES_GCM_TAG_BYTES < mlen) { return CR_E_SPACE; }
   // Counter blocks start at inc32(J0) = IV || 0x00000002.
-  crx_aes_ctr_xor(&ctx->skey[0], ctx->rounds, &nonce->b[0], 2, ct, cr_aes_gcm_ptr(msg, mlen), mlen);
+  if (ctx->hw == 1) {
+    crx_aes_hw_ctr_xor(&ctx->rk[0], ctx->rounds, &nonce->b[0], 2, cr_aes_gcm_ptr(msg, mlen), ct, mlen);
+  } else {
+    crx_aes_ctr_xor(&ctx->skey[0], ctx->rounds, &nonce->b[0], 2, ct, cr_aes_gcm_ptr(msg, mlen), mlen);
+  }
   cr_aes_gcm_tag(&ct[mlen], ctx, &nonce->b[0], cr_aes_gcm_ptr(ad, adlen), adlen, ct, mlen);
   *ct_len = mlen + CR_AES_GCM_TAG_BYTES;
   return CR_OK;
@@ -181,12 +203,16 @@ export fn cr_aes_gcm_decrypt(ctx: CrAesGcm*, pt: uint8*, pt_cap: int64, pt_len: 
     cr_wipe(pt, pt_cap);
     return CR_E_VERIFY;
   }
-  crx_aes_ctr_xor(&ctx->skey[0], ctx->rounds, &nonce->b[0], 2, pt, ct, mlen);
+  if (ctx->hw == 1) {
+    crx_aes_hw_ctr_xor(&ctx->rk[0], ctx->rounds, &nonce->b[0], 2, ct, pt, mlen);
+  } else {
+    crx_aes_ctr_xor(&ctx->skey[0], ctx->rounds, &nonce->b[0], 2, pt, ct, mlen);
+  }
   *pt_len = mlen;
   return CR_OK;
 }
 
-/// Erases a CrAesGcm (round keys and GHASH key) and marks it uninitialized.
+/// Erases a CrAesGcm (both forms of the round keys and the GHASH key) and marks it uninitialized.
 /// Call it when the key is no longer needed.
 /// in: ctx, may be null (nothing happens)
 /// returns: -
@@ -196,7 +222,16 @@ export fn cr_aes_gcm_decrypt(ctx: CrAesGcm*, pt: uint8*, pt_cap: int64, pt_len: 
 export fn cr_aes_gcm_wipe(ctx: CrAesGcm*) {
   if (ctx == 0) { return; }
   cr_wipe((uint8*)&ctx->skey[0], 960);
+  cr_wipe(&ctx->rk[0], 240);
   cr_wipe(&ctx->h[0], 16);
   ctx->rounds = 0;
   ctx->ready = 0;
+  ctx->hw = 0;
+}
+
+/// internal: makes ctx use the portable constant-time code even on a CPU with AES-NI; for tests that compare the two paths.
+/// in: ctx initialized with cr_aes_gcm_init, may be null (nothing happens)
+export fn crx_aes_gcm_force_portable(ctx: CrAesGcm*) {
+  if (ctx == 0) { return; }
+  ctx->hw = 0;
 }
