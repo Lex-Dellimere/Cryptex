@@ -1,0 +1,338 @@
+// SHA-1 / HMAC-SHA1 (internal) against FIPS 180-4, RFC 2202 and every row of
+// tests/vec_sha1.mettle; HOTP (RFC 4226 Appendix D), TOTP (RFC 6238
+// Appendix B), verification with a window, base32 (RFC 4648 section 10) and
+// the otpauth:// URI.
+import "crypto/status";
+import "crypto/types";
+import "crypto/core";
+import "crypto/sha1";
+import "crypto/totp";
+import "std/mem";
+import "tcheck";
+import "vec_sha1";
+
+// SHA-1 of a string, one shot, as hex.
+fn sha1_hex(msg: string) -> string {
+  var s: CrxSha1;
+  var d: uint8[20];
+  crx_sha1_init(&s);
+  crx_sha1_update(&s, msg.chars, (int64)msg.length);
+  crx_sha1_final(&s, &d[0]);
+  return tc_hex(&d[0], 20);
+}
+
+// HMAC-SHA1 of key/msg (both n bytes of a fill byte or text) as hex checked.
+fn hmac_check(name: string, key: uint8*, klen: int64, msg: uint8*, n: int64, want: string) {
+  var d: uint8[20];
+  crx_hmac_sha1(&d[0], key, klen, msg, n);
+  tc_hex_eq(name, &d[0], 20, want);
+}
+
+fn check_sha1_basics() {
+  var h: string = sha1_hex("abc");
+  tc_ok("sha1 abc", h == "a9993e364706816aba3e25717850c26c9cd0d89d");
+  free(h.chars);
+  h = sha1_hex("");
+  tc_ok("sha1 empty", h == "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+  free(h.chars);
+  h = sha1_hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq");
+  tc_ok("sha1 448 bit", h == "84983e441c3bd26ebaae4aa1f95129e5e54670f1");
+  free(h.chars);
+}
+
+fn check_sha1_vectors() {
+  var msg: uint8[4096];
+  var key: uint8[512];
+  for r in 0..VEC_SHA1_N {
+    var row: string = VEC_SHA1[r];
+    var label: string = "sha1 row {r}";
+    var n: int64 = tc_unhex(tc_field(row, 0), &msg[0], 4096);
+    var klen: int64 = tc_unhex(tc_field(row, 2), &key[0], 512);
+    tc_ok(label + " decoded", n >= 0 && klen >= 0);
+    var want: string = tc_field(row, 1);
+    var wantmac: string = tc_field(row, 3);
+
+    var o: uint8[20];
+    var s: CrxSha1;
+    crx_sha1_init(&s);
+    crx_sha1_update(&s, &msg[0], n);
+    crx_sha1_final(&s, &o[0]);
+    tc_hex_eq(label + " one shot", &o[0], 20, want);
+    tc_ok(label + " state wiped", tc_all_zero((uint8*)&s, 104));
+
+    // Three uneven parts: n/7, then n/3 more, then the rest.
+    var c1: int64 = n / 7;
+    var c2: int64 = c1 + n / 3;
+    crx_sha1_init(&s);
+    crx_sha1_update(&s, &msg[0], c1);
+    crx_sha1_update(&s, &msg[c1], c2 - c1);
+    crx_sha1_update(&s, &msg[c2], n - c2);
+    crx_sha1_final(&s, &o[0]);
+    tc_hex_eq(label + " streamed", &o[0], 20, want);
+
+    crx_hmac_sha1(&o[0], &key[0], klen, &msg[0], n);
+    tc_hex_eq(label + " hmac", &o[0], 20, wantmac);
+  }
+}
+
+fn check_rfc2202() {
+  var key: uint8[80];
+  var msg: uint8[80];
+  // 1
+  tc_fill(&key[0], 20, 11);
+  hmac_check("2202 case 1", &key[0], 20, "Hi There".chars, 8, "b617318655057264e28bc0b6fb378c8ef146be00");
+  // 2
+  hmac_check("2202 case 2", "Jefe".chars, 4, "what do ya want for nothing?".chars, 28, "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79");
+  // 3
+  tc_fill(&key[0], 20, 170);
+  tc_fill(&msg[0], 50, 221);
+  hmac_check("2202 case 3", &key[0], 20, &msg[0], 50, "125d7342b9ac11cd91a39af48aa17b4f63f175d3");
+  // 4
+  for i in 0..25 {
+    key[i] = (uint8)(i + 1);
+  }
+  tc_fill(&msg[0], 50, 205);
+  hmac_check("2202 case 4", &key[0], 25, &msg[0], 50, "4c9007f4026250c6bc8414f9bf50c86c2d7235da");
+  // 5 (the full 20 bytes; the RFC also lists the 96-bit prefix)
+  tc_fill(&key[0], 20, 12);
+  hmac_check("2202 case 5", &key[0], 20, "Test With Truncation".chars, 20, "4c1a03424b55e07fe7f27be1d58bb9324a9a5a04");
+  // 6
+  tc_fill(&key[0], 80, 170);
+  hmac_check("2202 case 6", &key[0], 80, "Test Using Larger Than Block-Size Key - Hash Key First".chars, 54, "aa4ae5e15272d00e95705637ce8a3b55ed402112");
+  // 7
+  var long: string = "Test Using Larger Than Block-Size Key and Larger Than One Block-Size Data";
+  hmac_check("2202 case 7", &key[0], 80, long.chars, (int64)long.length, "e8e99d0f45237d786d6bbaa7965c7808bbff1a91");
+}
+
+fn check_hotp() {
+  var sec: string = "12345678901234567890";
+  var want: uint32[10] = [
+    (uint32)755224, (uint32)287082, (uint32)359152, (uint32)969429, (uint32)338314,
+    (uint32)254676, (uint32)287922, (uint32)162583, (uint32)399871, (uint32)520489
+  ];
+  for i in 0..10 {
+    var code: uint32 = 99;
+    tc_rc("hotp rc {i}", cr_hotp(&code, sec.chars, 20, (uint64)i, 6), CR_OK);
+    tc_ok("hotp {i}", code == want[i]);
+  }
+  // Seven and eight digits are the same truncation, mod 10^d.
+  var c7: uint32 = 0;
+  var c8: uint32 = 0;
+  tc_rc("hotp 7", cr_hotp(&c7, sec.chars, 20, 0, 7), CR_OK);
+  tc_rc("hotp 8", cr_hotp(&c8, sec.chars, 20, 0, 8), CR_OK);
+  tc_ok("hotp 7 value", c7 == 4755224);
+  tc_ok("hotp 8 value", c8 == 84755224);
+  // Argument errors zero the output.
+  var z: uint32 = 5;
+  tc_rc("hotp digits 5", cr_hotp(&z, sec.chars, 20, 0, 5), CR_E_ARG);
+  tc_ok("hotp digits 5 out", z == 0);
+  z = 5;
+  tc_rc("hotp digits 9", cr_hotp(&z, sec.chars, 20, 0, 9), CR_E_ARG);
+  tc_ok("hotp digits 9 out", z == 0);
+  tc_rc("hotp n 0", cr_hotp(&z, sec.chars, 0, 0, 6), CR_E_ARG);
+  tc_rc("hotp n 65", cr_hotp(&z, sec.chars, 65, 0, 6), CR_E_ARG);
+  tc_rc("hotp null secret", cr_hotp(&z, 0, 20, 0, 6), CR_E_ARG);
+  tc_rc("hotp null out", cr_hotp(0, sec.chars, 20, 0, 6), CR_E_ARG);
+}
+
+fn check_totp() {
+  var sec: string = "12345678901234567890";
+  var times: int64[6] = [(int64)59, (int64)1111111109, (int64)1111111111, (int64)1234567890, (int64)2000000000, (int64)20000000000];
+  var want: uint32[6] = [(uint32)94287082, (uint32)7081804, (uint32)14050471, (uint32)89005924, (uint32)69279037, (uint32)65353130];
+  for i in 0..6 {
+    var code: uint32 = 0;
+    tc_rc("totp rc {i}", cr_totp(&code, sec.chars, 20, times[i], 30, 8), CR_OK);
+    tc_ok("totp {i}", code == want[i]);
+  }
+  var z: uint32 = 5;
+  tc_rc("totp negative time", cr_totp(&z, sec.chars, 20, -1, 30, 6), CR_E_ARG);
+  tc_ok("totp negative time out", z == 0);
+  tc_rc("totp period 0", cr_totp(&z, sec.chars, 20, 59, 0, 6), CR_E_ARG);
+  tc_rc("totp period 301", cr_totp(&z, sec.chars, 20, 59, 301, 6), CR_E_ARG);
+  tc_rc("totp digits 5", cr_totp(&z, sec.chars, 20, 59, 30, 5), CR_E_ARG);
+  // Period 1 and 300 are accepted.
+  tc_rc("totp period 1", cr_totp(&z, sec.chars, 20, 59, 1, 6), CR_OK);
+  tc_rc("totp period 300", cr_totp(&z, sec.chars, 20, 59, 300, 6), CR_OK);
+}
+
+fn check_verify() {
+  var sec: string = "12345678901234567890";
+  var step: int64 = 77;
+  // Time 59 is step 1: 94287082 (RFC 6238).
+  tc_ok("verify exact", cr_totp_verify("94287082", sec.chars, 20, 59, 30, 8, 0, &step));
+  tc_ok("verify exact step", step == 1);
+  // The same code, one step later (time 89 is step 2).
+  step = 77;
+  tc_ok("verify previous window 1", cr_totp_verify("94287082", sec.chars, 20, 89, 30, 8, 1, &step));
+  tc_ok("verify previous step", step == 1);
+  step = 77;
+  tc_ok("verify previous window 0", !cr_totp_verify("94287082", sec.chars, 20, 89, 30, 8, 0, &step));
+  tc_ok("verify miss step", step == -1);
+  // And one step earlier (time 29 is step 0, the code is for step 1).
+  step = 77;
+  tc_ok("verify next window 1", cr_totp_verify("94287082", sec.chars, 20, 29, 30, 8, 1, &step));
+  tc_ok("verify next step", step == 1);
+  // matched_step may be null.
+  tc_ok("verify null step", cr_totp_verify("94287082", sec.chars, 20, 59, 30, 8, 0, 0));
+  // Wrong digit, wrong length, non-digit.
+  tc_ok("verify wrong digit", !cr_totp_verify("94287083", sec.chars, 20, 59, 30, 8, 0, &step));
+  tc_ok("verify 7 chars", !cr_totp_verify("9428708", sec.chars, 20, 59, 30, 8, 0, &step));
+  tc_ok("verify 9 chars", !cr_totp_verify("942870820", sec.chars, 20, 59, 30, 8, 0, &step));
+  tc_ok("verify 5 for 6", !cr_totp_verify("28708", sec.chars, 20, 59, 30, 6, 0, &step));
+  tc_ok("verify letter", !cr_totp_verify("9428708a", sec.chars, 20, 59, 30, 8, 0, &step));
+  tc_ok("verify space", !cr_totp_verify("9428708 ", sec.chars, 20, 59, 30, 8, 0, &step));
+  tc_ok("verify empty", !cr_totp_verify("", sec.chars, 20, 59, 30, 8, 0, &step));
+  tc_ok("verify window 11", !cr_totp_verify("94287082", sec.chars, 20, 59, 30, 8, 11, &step));
+  tc_ok("verify bad time", !cr_totp_verify("94287082", sec.chars, 20, -1, 30, 8, 0, &step));
+  tc_ok("verify null secret", !cr_totp_verify("94287082", 0, 20, 59, 30, 8, 0, &step));
+  // A leading-zero code: 07081804 at time 1111111109 (RFC 6238).
+  tc_ok("verify leading zero", cr_totp_verify("07081804", sec.chars, 20, 1111111109, 30, 8, 0, &step));
+  tc_ok("verify leading zero stripped", !cr_totp_verify("7081804", sec.chars, 20, 1111111109, 30, 8, 0, &step));
+  // Early in the epoch the window never looks below step 0.
+  var code: uint32 = 0;
+  cr_totp(&code, sec.chars, 20, 0, 30, 6);
+  tc_ok("verify at epoch", cr_totp_verify("755224", sec.chars, 20, 0, 30, 6, 10, &step) || code != 755224);
+  // The 6-digit code for step 1 (time 59) against a window of 10 at time 59.
+  var c6: uint32 = 0;
+  cr_totp(&c6, sec.chars, 20, 59, 30, 6);
+  tc_ok("c6 value", c6 == 287082);
+  step = 77;
+  tc_ok("verify six digits", cr_totp_verify("287082", sec.chars, 20, 59, 30, 6, 10, &step));
+  tc_ok("verify six digits step", step == 1);
+}
+
+// Encodes `bin` (n bytes) to base32 and checks the text, then decodes it back.
+fn b32_roundtrip(bin: string, want: string) {
+  var buf: uint8[64];
+  var l: int64 = 99;
+  var n: int64 = (int64)bin.length;
+  var rc: int32 = cr_totp_secret_text(&buf[0], 64, &l, bin.chars, n);
+  tc_rc("b32 enc rc '" + bin + "'", rc, CR_OK);
+  tc_ok("b32 enc len '" + bin + "'", l == (int64)want.length);
+  var got: string = str_from_bytes((cstring)&buf[0], l);
+  tc_ok("b32 enc '" + bin + "'", got == want);
+  tc_ok("b32 enc nul '" + bin + "'", buf[l] == 0);
+
+  var back: uint8[64];
+  var bl: int64 = 99;
+  rc = cr_totp_secret_from_text(&back[0], 64, &bl, want);
+  tc_rc("b32 dec rc '" + bin + "'", rc, CR_OK);
+  tc_ok("b32 dec len '" + bin + "'", bl == n);
+  tc_ok("b32 dec '" + bin + "'", mem_equal(&back[0], bin.chars, n));
+}
+
+fn check_base32() {
+  b32_roundtrip("", "");
+  b32_roundtrip("f", "MY");
+  b32_roundtrip("fo", "MZXQ");
+  b32_roundtrip("foo", "MZXW6");
+  b32_roundtrip("foob", "MZXW6YQ");
+  b32_roundtrip("fooba", "MZXW6YTB");
+  b32_roundtrip("foobar", "MZXW6YTBOI");
+
+  // Pasted text: lowercase, spaces and dashes.
+  var out: uint8[32];
+  var ol: int64 = 99;
+  tc_rc("b32 pasted", cr_totp_secret_from_text(&out[0], 32, &ol, "mzxw 6ytb-oi"), CR_OK);
+  tc_ok("b32 pasted len", ol == 6);
+  tc_ok("b32 pasted value", mem_equal(&out[0], "foobar".chars, 6));
+
+  // Rejections: out is wiped, *out_len = 0.
+  var rejects: string[8] = ["MZXW6YTBOI==", "MZXW6YTB1", "MZ", "MZXW6Y", "MZXW6YTB1O", "M", "MZX", "MZXW6YT\n"];
+  for i in 0..8 {
+    tc_fill(&out[0], 32, 170);
+    ol = 99;
+    tc_rc("b32 reject {i}", cr_totp_secret_from_text(&out[0], 32, &ol, rejects[i]), CR_E_DECODE);
+    tc_ok("b32 reject len {i}", ol == 0);
+    tc_ok("b32 reject wiped {i}", tc_all_zero(&out[0], 32));
+  }
+  // Too small an output buffer.
+  tc_fill(&out[0], 32, 170);
+  tc_rc("b32 dec space", cr_totp_secret_from_text(&out[0], 5, &ol, "MZXW6YTBOI"), CR_E_SPACE);
+  tc_ok("b32 dec space len", ol == 0);
+
+  // Encoding: CR_E_SPACE writes nothing; capacity is (8n+4)/5+1.
+  var small: uint8[9];
+  tc_fill(&small[0], 9, 170);
+  tc_rc("b32 enc space", cr_totp_secret_text(&small[0], 9, &ol, "foobar".chars, 6), CR_E_SPACE);
+  tc_ok("b32 enc space len", ol == 0);
+  var untouched: bool = true;
+  for i in 0..9 {
+    if (small[i] != 170) { untouched = false; }
+  }
+  tc_ok("b32 enc space untouched", untouched);
+  var exact: uint8[11];
+  tc_rc("b32 enc exact", cr_totp_secret_text(&exact[0], 11, &ol, "foobar".chars, 6), CR_OK);
+  // A full 20-byte secret is 32 characters.
+  var sec: string = "12345678901234567890";
+  var t: uint8[33];
+  tc_rc("b32 20 bytes", cr_totp_secret_text(&t[0], 33, &ol, sec.chars, 20), CR_OK);
+  tc_ok("b32 20 bytes len", ol == 32);
+  tc_ok("b32 20 bytes text", str_from_bytes((cstring)&t[0], ol) == "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ");
+  tc_rc("b32 enc null out_len", cr_totp_secret_text(&t[0], 33, 0, sec.chars, 20), CR_E_ARG);
+  tc_rc("b32 enc null secret", cr_totp_secret_text(&t[0], 33, &ol, 0, 20), CR_E_ARG);
+}
+
+fn check_uri() {
+  var want: string = "otpauth://totp/Mettle%20Registry:nox%40example.com?secret=JBSWY3DPEHPK3PXP&issuer=Mettle%20Registry&algorithm=SHA1&digits=6&period=30";
+  var out: uint8[256];
+  var l: int64 = 0;
+  tc_rc("uri rc", cr_totp_uri(&out[0], 256, &l, "Mettle Registry", "nox@example.com", "JBSWY3DPEHPK3PXP", 6, 30), CR_OK);
+  tc_ok("uri len", l == (int64)want.length);
+  tc_ok("uri text", str_from_bytes((cstring)&out[0], l) == want);
+  tc_ok("uri nul", out[l] == 0);
+
+  // Exact capacity fits, one less does not and writes nothing.
+  var tight: uint8[200];
+  tc_fill(&tight[0], 200, 170);
+  tc_rc("uri exact cap", cr_totp_uri(&tight[0], l + 1, &l, "Mettle Registry", "nox@example.com", "JBSWY3DPEHPK3PXP", 6, 30), CR_OK);
+  var l2: int64 = 99;
+  tc_fill(&tight[0], 200, 170);
+  tc_rc("uri space", cr_totp_uri(&tight[0], l, &l2, "Mettle Registry", "nox@example.com", "JBSWY3DPEHPK3PXP", 6, 30), CR_E_SPACE);
+  tc_ok("uri space len", l2 == 0);
+  var untouched: bool = true;
+  for i in 0..200 {
+    if (tight[i] != 170) { untouched = false; }
+  }
+  tc_ok("uri space untouched", untouched);
+
+  // Other digits and period, plain ASCII labels, reserved characters.
+  tc_rc("uri 8/60", cr_totp_uri(&out[0], 256, &l, "a.b-c_d~", "x/y&z", "AAAA", 8, 60), CR_OK);
+  tc_ok("uri 8/60 text", str_from_bytes((cstring)&out[0], l) == "otpauth://totp/a.b-c_d~:x%2Fy%26z?secret=AAAA&issuer=a.b-c_d~&algorithm=SHA1&digits=8&period=60");
+  tc_rc("uri period 1", cr_totp_uri(&out[0], 256, &l, "I", "A", "AAAA", 6, 1), CR_OK);
+  tc_ok("uri period 1 text", str_from_bytes((cstring)&out[0], l) == "otpauth://totp/I:A?secret=AAAA&issuer=I&algorithm=SHA1&digits=6&period=1");
+  tc_rc("uri period 300", cr_totp_uri(&out[0], 256, &l, "I", "A", "AAAA", 6, 300), CR_OK);
+  tc_ok("uri period 300 text", str_from_bytes((cstring)&out[0], l) == "otpauth://totp/I:A?secret=AAAA&issuer=I&algorithm=SHA1&digits=6&period=300");
+
+  // Argument errors.
+  tc_rc("uri colon issuer", cr_totp_uri(&out[0], 256, &l, "a:b", "x", "AAAA", 6, 30), CR_E_ARG);
+  tc_ok("uri colon issuer len", l == 0);
+  tc_rc("uri colon account", cr_totp_uri(&out[0], 256, &l, "a", "x:y", "AAAA", 6, 30), CR_E_ARG);
+  tc_rc("uri empty issuer", cr_totp_uri(&out[0], 256, &l, "", "x", "AAAA", 6, 30), CR_E_ARG);
+  tc_rc("uri empty account", cr_totp_uri(&out[0], 256, &l, "a", "", "AAAA", 6, 30), CR_E_ARG);
+  tc_rc("uri empty secret", cr_totp_uri(&out[0], 256, &l, "a", "x", "", 6, 30), CR_E_ARG);
+  tc_rc("uri lowercase secret", cr_totp_uri(&out[0], 256, &l, "a", "x", "aaaa", 6, 30), CR_E_ARG);
+  tc_rc("uri secret digit 1", cr_totp_uri(&out[0], 256, &l, "a", "x", "AAA1", 6, 30), CR_E_ARG);
+  tc_rc("uri secret padding", cr_totp_uri(&out[0], 256, &l, "a", "x", "AAAA====", 6, 30), CR_E_ARG);
+  tc_rc("uri digits 5", cr_totp_uri(&out[0], 256, &l, "a", "x", "AAAA", 5, 30), CR_E_ARG);
+  tc_rc("uri digits 9", cr_totp_uri(&out[0], 256, &l, "a", "x", "AAAA", 9, 30), CR_E_ARG);
+  tc_rc("uri period 0", cr_totp_uri(&out[0], 256, &l, "a", "x", "AAAA", 6, 0), CR_E_ARG);
+  tc_rc("uri period 301", cr_totp_uri(&out[0], 256, &l, "a", "x", "AAAA", 6, 301), CR_E_ARG);
+  tc_rc("uri null out_len", cr_totp_uri(&out[0], 256, 0, "a", "x", "AAAA", 6, 30), CR_E_ARG);
+  var big: uint8[300];
+  tc_fill(&big[0], 300, 97);
+  var long: string = str_from_bytes((cstring)&big[0], 256);
+  tc_rc("uri issuer 256", cr_totp_uri(&out[0], 256, &l, long, "x", "AAAA", 6, 30), CR_E_ARG);
+}
+
+fn main() -> int32 {
+  check_sha1_basics();
+  check_sha1_vectors();
+  check_rfc2202();
+  check_hotp();
+  check_totp();
+  check_verify();
+  check_base32();
+  check_uri();
+  return tc_finish("totp");
+}
