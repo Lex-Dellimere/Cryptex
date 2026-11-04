@@ -1,22 +1,16 @@
 import "mbuild/api";
 
-// crypto: a thin, misuse-resistant Mettle API over libsodium.
-// No cryptography is implemented in Mettle; every primitive is libsodium's.
+// crypto: misuse-resistant crypto for Mettle, written in pure Mettle.
+// No C and no shared libraries; randomness comes from the getrandom syscall.
 //
 // Tests: tests/<name>_test.mettle are test programs. `mbuild test` builds
 // and runs them (debug), `mbuild test -r` (release). tests/dependent is a
-// separate package that checks a dependent links with no flags of its own.
+// separate package that uses crypto the way a dependent does.
 fn project() {
-  mb_package("crypto", "0.1.0");
-  mb_meta("description", "misuse-resistant Mettle bindings to libsodium: hashes, HMAC, Argon2id, XChaCha20-Poly1305, X25519, Ed25519, hex/base64url, signed values, tokens, seal/open");
+  mb_package("crypto", "0.2.0");
+  mb_meta("description", "misuse-resistant crypto in pure Mettle: SHA-2, BLAKE2b, HMAC, Argon2id, XChaCha20-Poly1305, X25519, Ed25519, TOTP, hex/base64url, signed values, tokens, seal/open");
   mb_meta("license", "Apache-2.0");
   mb_import_root("src");
-  // libsodium 1.0.18 or newer. Links libsodium.so where the system has the
-  // dev link, else the versioned runtime file (Debian/Ubuntu ship only
-  // libsodium.so.23). Every package that depends on crypto gets this too.
-  mb_on("linux");
-  mb_link_lib_any("sodium, :libsodium.so.23");
-  mb_on("");
 }
 
 fn deps() {

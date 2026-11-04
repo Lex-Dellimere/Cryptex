@@ -10,6 +10,7 @@
 // The password only reaches the matrix through BLAKE2b and the BlaMka
 // compression, which are branch-free and table-free.
 
+import "std/mem";
 import "status";
 import "core";
 import "blake2b";
