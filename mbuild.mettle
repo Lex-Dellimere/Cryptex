@@ -5,7 +5,7 @@ import "mbuild/api";
 fn project() {
   mb_package("crypto", "0.1.0");
   mb_meta("description", "misuse-resistant Mettle bindings to libsodium: hashes, HMAC, Argon2id, XChaCha20-Poly1305, X25519, Ed25519, hex/base64url");
-  mb_meta("license", "MIT");
+  mb_meta("license", "Apache-2.0");
   mb_import_root("src");
   // libsodium 1.0.18 or newer. Debian/Ubuntu ship the runtime as
   // libsodium.so.23 without the unversioned libsodium.so dev symlink, so the
@@ -33,7 +33,7 @@ fn deps() {
 fn cmd_test_programs(a: MbArgs*) -> int32 {
   var mbuild: string = mb_env("MBUILD_EXE");
   if (mbuild == "") { mbuild = "mbuild"; }
-  var suites: string[8] = ["t_hash", "t_mac", "t_pwhash", "t_aead", "t_kx", "t_sign", "t_encode", "t_random"];
+  var suites: string[11] = ["t_hash", "t_mac", "t_pwhash", "t_aead", "t_kx", "t_sign", "t_encode", "t_random", "t_signed", "t_token", "t_seal"];
   var profiles: string[2] = ["debug", "release"];
   var failed: int32 = 0;
   for pi in 0..2 {
@@ -52,7 +52,7 @@ fn cmd_test_programs(a: MbArgs*) -> int32 {
         failed = failed + 1;
       }
     }
-    for i in 0..8 {
+    for i in 0..11 {
       var r: MbCmd* = mb_cmd(mb_root() + "/tests/build/linux/" + prof + "/" + suites[i]);
       if (mb_cmd_run(r) != 0) {
         mb_warn(suites[i] + " failed (" + prof + ")");

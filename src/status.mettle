@@ -59,6 +59,14 @@ export const CR_E_INTERNAL: int32 = -6;
 /// thread: constant
 /// example: if (cr_x25519_shared(&s, &sk, &peer) == CR_E_KEY) { reject(); }
 export const CR_E_KEY: int32 = -7;
+/// CR_E_EXPIRED: a signed value is authentic but its expiry time has passed
+/// (cr_signed_verify_until). The value is not released.
+/// in: -
+/// returns: -8
+/// owns: nothing
+/// thread: constant
+/// example: if (rc == CR_E_EXPIRED) { show("link expired"); }
+export const CR_E_EXPIRED: int32 = -8;
 
 /// Names a status code for logs.
 /// in: code, a CR_* status
@@ -75,5 +83,6 @@ export fn cr_status_name(code: int32) -> string {
   if (code == CR_E_DECODE) { return "CR_E_DECODE"; }
   if (code == CR_E_INTERNAL) { return "CR_E_INTERNAL"; }
   if (code == CR_E_KEY) { return "CR_E_KEY"; }
+  if (code == CR_E_EXPIRED) { return "CR_E_EXPIRED"; }
   return "CR_E_UNKNOWN";
 }

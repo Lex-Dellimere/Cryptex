@@ -1,0 +1,360 @@
+// Signed values: four independently computed vectors (Python hmac), verify
+// with key rotation, purpose separation, tampering, malformed input,
+// capacity and argument checks.
+import "std/mem";
+import "crypto/status";
+import "crypto/types";
+import "crypto/core";
+import "crypto/signed";
+import "tcheck";
+
+fn str_eq_buf(buf: uint8*, n: int64, want: string) -> bool {
+  if (n != (int64)want.length) { return false; }
+  var i: int64 = 0;
+  while (i < n) {
+    if (buf[i] != want.chars[i]) { return false; }
+    i = i + 1;
+  }
+  return true;
+}
+
+// Signs and compares with the expected "value.SIG" text; also checks that
+// nothing is written past the reported length.
+fn sign_vec(label: string, key: CrKey32*, purpose: string, value: string, want: string) {
+  var buf: uint8[300];
+  tc_fill(&buf[0], 300, 90);
+  var n: int64 = 77;
+  var rc: int32 = cr_signed_sign(&buf[0], 300, &n, key, purpose, value);
+  tc_rc(label + " sign rc", rc, CR_OK);
+  tc_ok(label + " sign len", n == (int64)value.length + CR_SIGNED_EXTRA && n == (int64)want.length);
+  tc_ok(label + " sign bytes", str_eq_buf(&buf[0], n, want));
+  tc_ok(label + " sign no overrun", buf[n] == 90);
+}
+
+fn verify_ok(label: string, keys: CrKey32*, nkeys: int32, purpose: string, sv: string, want_value: string, want_idx: int32) {
+  var v: string = "x";
+  var ki: int32 = 55;
+  tc_rc(label + " verify rc", cr_signed_verify(&v, &ki, keys, nkeys, purpose, sv), CR_OK);
+  tc_ok(label + " value", v == want_value);
+  tc_ok(label + " key_index", ki == want_idx);
+}
+
+fn verify_fail(label: string, keys: CrKey32*, nkeys: int32, purpose: string, sv: string) {
+  var v: string = "x";
+  var ki: int32 = 55;
+  tc_rc(label + " rc", cr_signed_verify(&v, &ki, keys, nkeys, purpose, sv), CR_E_VERIFY);
+  tc_ok(label + " value empty", v == "");
+  tc_ok(label + " key_index -1", ki == -1);
+}
+
+// Signs an expiring value and compares with the expected "value.EXP.SIG".
+fn until_vec(label: string, key: CrKey32*, purpose: string, value: string, expires: int64, want: string) {
+  var buf: uint8[300];
+  tc_fill(&buf[0], 300, 90);
+  var n: int64 = 77;
+  var rc: int32 = cr_signed_sign_until(&buf[0], 300, &n, key, purpose, value, expires);
+  tc_rc(label + " sign rc", rc, CR_OK);
+  tc_ok(label + " sign len", n == (int64)value.length + CR_SIGNED_UNTIL_EXTRA && n == (int64)want.length);
+  tc_ok(label + " sign bytes", str_eq_buf(&buf[0], n, want));
+  tc_ok(label + " sign no overrun", buf[n] == 90);
+}
+
+fn until_ok(label: string, keys: CrKey32*, nkeys: int32, purpose: string, sv: string, now: int64, want_value: string, want_idx: int32) {
+  var v: string = "x";
+  var ki: int32 = 55;
+  tc_rc(label + " verify rc", cr_signed_verify_until(&v, &ki, keys, nkeys, purpose, sv, now), CR_OK);
+  tc_ok(label + " value", v == want_value);
+  tc_ok(label + " key_index", ki == want_idx);
+}
+
+fn until_err(label: string, keys: CrKey32*, nkeys: int32, purpose: string, sv: string, now: int64, want_rc: int32) {
+  var v: string = "x";
+  var ki: int32 = 55;
+  tc_rc(label + " rc", cr_signed_verify_until(&v, &ki, keys, nkeys, purpose, sv, now), want_rc);
+  tc_ok(label + " value empty", v == "");
+  tc_ok(label + " key_index -1", ki == -1);
+}
+
+fn main() -> int32 {
+  var keys: CrKey32[2];
+  for i in 0..32 {
+    keys[0].b[i] = (uint8)i;
+    keys[1].b[i] = (uint8)(32 + i);
+  }
+
+  var v1: string = "user:42.MZt-cEiECk1c0XatSohbFe_cNt83pZVS0vJMjEfvuHE";
+  var v2: string = "user:42.6O03-1mOW4JdHst-pie4ZXf7MEru4baJpMYdsuki5wI";
+  var v3: string = "user:42.U1_qTmgQOuLa5rWXOcZVbjPJ-GLAEAGkjO-a6Qihk8Q";
+  var v4: string = ".KGrdyNfHcSmoCyXUw-ArZmKru68Df_MK13fJ8G5mH0g";
+
+  sign_vec("v1", &keys[0], "remember", "user:42", v1);
+  sign_vec("v2", &keys[1], "remember", "user:42", v2);
+  sign_vec("v3", &keys[0], "unsubscribe", "user:42", v3);
+  sign_vec("v4", &keys[0], "remember", "", v4);
+
+  verify_ok("v1", &keys[0], 1, "remember", v1, "user:42", 0);
+  verify_ok("v2 rotated", &keys[0], 2, "remember", v2, "user:42", 1);
+  verify_ok("v3", &keys[0], 1, "unsubscribe", v3, "user:42", 0);
+  verify_ok("v4 empty value", &keys[0], 1, "remember", v4, "", 0);
+  verify_ok("v1 with two keys", &keys[0], 2, "remember", v1, "user:42", 0);
+  verify_fail("v2 old key missing", &keys[0], 1, "remember", v2);
+
+  // key_index is optional.
+  var v: string = "x";
+  tc_rc("null key_index", cr_signed_verify(&v, 0, &keys[0], 1, "remember", v1), CR_OK);
+  tc_ok("null key_index value", v == "user:42");
+
+  // The value is a view into the signed string.
+  tc_ok("value borrows", (uint64)v.chars == (uint64)v1.chars);
+
+  // Purpose separation.
+  verify_fail("wrong purpose", &keys[0], 1, "unsubscribe", v1);
+  verify_fail("v3 as remember", &keys[0], 1, "remember", v3);
+  verify_fail("prefix purpose", &keys[0], 1, "rememb", v1);
+
+  // Tampering: one value char, one SIG char.
+  verify_fail("value flipped", &keys[0], 1, "remember", "user:43.MZt-cEiECk1c0XatSohbFe_cNt83pZVS0vJMjEfvuHE");
+  verify_fail("sig flipped", &keys[0], 1, "remember", "user:42.MZt-cEiECk1c0XatSohbFe_cNt83pZVS0vJMjEfvuHF");
+  verify_fail("sig first flipped", &keys[0], 1, "remember", "user:42.NZt-cEiECk1c0XatSohbFe_cNt83pZVS0vJMjEfvuHE");
+  // Malformed: truncated, '.' replaced, '=' in SIG, too short, empty.
+  verify_fail("truncated", &keys[0], 1, "remember", "user:42.MZt-cEiECk1c0XatSohbFe_cNt83pZVS0vJMjEfvuH");
+  verify_fail("dot replaced", &keys[0], 1, "remember", "user:42_MZt-cEiECk1c0XatSohbFe_cNt83pZVS0vJMjEfvuHE");
+  verify_fail("sig with =", &keys[0], 1, "remember", "user:42.MZt-cEiECk1c0XatSohbFe_cNt83pZVS0vJMjEfvuH=");
+  verify_fail("sig with +", &keys[0], 1, "remember", "user:42.MZt+cEiECk1c0XatSohbFe_cNt83pZVS0vJMjEfvuHE");
+  verify_fail("extra char", &keys[0], 1, "remember", "user:42.MZt-cEiECk1c0XatSohbFe_cNt83pZVS0vJMjEfvuHEA");
+  verify_fail("too short", &keys[0], 1, "remember", ".MZt-cEiECk1c0XatSohbFe_cNt83pZVS0vJMjEfvuH");
+  verify_fail("empty input", &keys[0], 1, "remember", "");
+  verify_fail("no dot", &keys[0], 1, "remember", "MZt-cEiECk1c0XatSohbFe_cNt83pZVS0vJMjEfvuHE");
+
+  // Capacity: exactly vlen + 44 works, one less is CR_E_SPACE.
+  var buf: uint8[64];
+  var n: int64 = 9;
+  tc_fill(&buf[0], 64, 7);
+  tc_rc("cap exact", cr_signed_sign(&buf[0], 51, &n, &keys[0], "remember", "user:42"), CR_OK);
+  tc_ok("cap exact len", n == 51);
+  tc_fill(&buf[0], 64, 7);
+  n = 9;
+  tc_rc("cap short", cr_signed_sign(&buf[0], 50, &n, &keys[0], "remember", "user:42"), CR_E_SPACE);
+  tc_ok("cap short len 0", n == 0);
+  tc_ok("cap short untouched", buf[0] == 7 && buf[50] == 7);
+
+  // Argument checks for sign.
+  tc_rc("sign null out_len", cr_signed_sign(&buf[0], 64, 0, &keys[0], "remember", "a"), CR_E_ARG);
+  n = 9;
+  tc_rc("sign null out", cr_signed_sign(0, 64, &n, &keys[0], "remember", "a"), CR_E_ARG);
+  tc_ok("sign null out len 0", n == 0);
+  n = 9;
+  tc_rc("sign null key", cr_signed_sign(&buf[0], 64, &n, 0, "remember", "a"), CR_E_ARG);
+  tc_ok("sign null key len 0", n == 0);
+  n = 9;
+  tc_rc("sign empty purpose", cr_signed_sign(&buf[0], 64, &n, &keys[0], "", "a"), CR_E_ARG);
+  tc_ok("sign empty purpose len 0", n == 0);
+
+  // Purpose length: 256 rejected, 255 round-trips.
+  var p255: uint8* = (uint8*)malloc(256);
+  var p256: uint8* = (uint8*)malloc(257);
+  tc_fill(p255, 255, 112);
+  tc_fill(p256, 256, 112);
+  var ps255: string = str_from_bytes((cstring)p255, 255);
+  var ps256: string = str_from_bytes((cstring)p256, 256);
+  n = 9;
+  tc_rc("sign purpose 256", cr_signed_sign(&buf[0], 64, &n, &keys[0], ps256, "a"), CR_E_ARG);
+  tc_ok("sign purpose 256 len 0", n == 0);
+  tc_rc("sign purpose 255", cr_signed_sign(&buf[0], 64, &n, &keys[0], ps255, "a"), CR_OK);
+  tc_ok("sign purpose 255 len", n == 45);
+  var sv255: string = str_from_bytes((cstring)&buf[0], n);
+  verify_ok("purpose 255", &keys[0], 1, ps255, sv255, "a", 0);
+  verify_fail("purpose 255 vs 254", &keys[0], 1, str_from_bytes((cstring)p255, 254), sv255);
+  var v256: string = "x";
+  var k256: int32 = 55;
+  tc_rc("verify purpose 256", cr_signed_verify(&v256, &k256, &keys[0], 1, ps256, sv255), CR_E_ARG);
+  tc_ok("verify purpose 256 out", v256 == "" && k256 == -1);
+  tc_rc("verify purpose empty", cr_signed_verify(&v256, &k256, &keys[0], 1, "", v1), CR_E_ARG);
+  tc_ok("verify purpose empty out", v256 == "" && k256 == -1);
+  free(p255);
+  free(p256);
+
+  // Argument checks for verify.
+  var vv: string = "x";
+  var ki: int32 = 55;
+  tc_rc("verify nkeys 0", cr_signed_verify(&vv, &ki, &keys[0], 0, "remember", v1), CR_E_ARG);
+  tc_ok("verify nkeys 0 out", vv == "" && ki == -1);
+  vv = "x";
+  ki = 55;
+  tc_rc("verify nkeys 9", cr_signed_verify(&vv, &ki, &keys[0], 9, "remember", v1), CR_E_ARG);
+  tc_ok("verify nkeys 9 out", vv == "" && ki == -1);
+  vv = "x";
+  ki = 55;
+  tc_rc("verify nkeys -1", cr_signed_verify(&vv, &ki, &keys[0], -1, "remember", v1), CR_E_ARG);
+  vv = "x";
+  ki = 55;
+  tc_rc("verify null keys", cr_signed_verify(&vv, &ki, 0, 1, "remember", v1), CR_E_ARG);
+  tc_ok("verify null keys out", vv == "" && ki == -1);
+  tc_rc("verify null out_value", cr_signed_verify(0, &ki, &keys[0], 1, "remember", v1), CR_E_ARG);
+
+  // Eight keys: the last one still matches.
+  var many: CrKey32[8];
+  for j in 0..8 {
+    tc_fill(&many[j].b[0], 32, 100 + j);
+  }
+  var sv8: uint8[64];
+  var n8: int64 = 0;
+  tc_rc("sign with key 7", cr_signed_sign(&sv8[0], 64, &n8, &many[7], "remember", "u"), CR_OK);
+  verify_ok("key 7 of 8", &many[0], 8, "remember", str_from_bytes((cstring)&sv8[0], n8), "u", 7);
+
+  // ---- Expiring form "value.EXP.SIG" ----
+  var u1: string = "user:42.000000006955b900.Ydc6LsiTOH6fTwvkG-5BBOn7WohtBik3qT7PslEGBEU";
+  var u2: string = "user:42.000000006955b900.vhOa0QWBr79j5-3WDuLR8lDUilZ2pXr2W7joKm7zSbg";
+  var u3: string = ".0000000000000000.3EAEgMQTrtJR3MQd68Q4EFAXcGHbEQkuyVS2WAeHv7Y";
+  var exp0: int64 = 1767225600;
+
+  until_vec("u1", &keys[0], "confirm-email", "user:42", exp0, u1);
+  until_vec("u2", &keys[1], "confirm-email", "user:42", exp0, u2);
+  until_vec("u3", &keys[0], "confirm-email", "", 0, u3);
+  tc_ok("until extra const", CR_SIGNED_UNTIL_EXTRA == 61);
+
+  until_ok("u1 before expiry", &keys[0], 1, "confirm-email", u1, exp0 - 1, "user:42", 0);
+  until_ok("u1 long before", &keys[0], 1, "confirm-email", u1, 0, "user:42", 0);
+  until_ok("u2 rotated", &keys[0], 2, "confirm-email", u2, exp0 - 1, "user:42", 1);
+  until_ok("u1 two keys", &keys[0], 2, "confirm-email", u1, exp0 - 1, "user:42", 0);
+  until_ok("u3 empty value, expires 0, now -1", &keys[0], 1, "confirm-email", u3, -1, "", 0);
+  until_err("u2 old key missing", &keys[0], 1, "confirm-email", u2, exp0 - 1, CR_E_VERIFY);
+
+  // Expiry: now == expires and now > expires are both expired.
+  until_err("u1 at expiry", &keys[0], 1, "confirm-email", u1, exp0, CR_E_EXPIRED);
+  until_err("u1 after expiry", &keys[0], 1, "confirm-email", u1, exp0 + 100000, CR_E_EXPIRED);
+  until_err("u3 expires 0, now 0", &keys[0], 1, "confirm-email", u3, 0, CR_E_EXPIRED);
+  until_err("u2 rotated expired", &keys[0], 2, "confirm-email", u2, exp0, CR_E_EXPIRED);
+
+  // The value is a view into the signed string.
+  var uv: string = "x";
+  tc_rc("until null key_index", cr_signed_verify_until(&uv, 0, &keys[0], 1, "confirm-email", u1, exp0 - 1), CR_OK);
+  tc_ok("until null key_index value", uv == "user:42");
+  tc_ok("until value borrows", (uint64)uv.chars == (uint64)u1.chars);
+
+  // EXP is bound by the MAC: any change to it fails, even with an early now.
+  until_err("exp extended", &keys[0], 1, "confirm-email", "user:42.000000006955b901.Ydc6LsiTOH6fTwvkG-5BBOn7WohtBik3qT7PslEGBEU", 0, CR_E_VERIFY);
+  until_err("exp far future", &keys[0], 1, "confirm-email", "user:42.00000000ffffffff.Ydc6LsiTOH6fTwvkG-5BBOn7WohtBik3qT7PslEGBEU", 0, CR_E_VERIFY);
+  until_err("exp first digit", &keys[0], 1, "confirm-email", "user:42.100000006955b900.Ydc6LsiTOH6fTwvkG-5BBOn7WohtBik3qT7PslEGBEU", 0, CR_E_VERIFY);
+  until_err("exp uppercase", &keys[0], 1, "confirm-email", "user:42.000000006955B900.Ydc6LsiTOH6fTwvkG-5BBOn7WohtBik3qT7PslEGBEU", 0, CR_E_VERIFY);
+  until_err("exp non-hex", &keys[0], 1, "confirm-email", "user:42.00000000695gb900.Ydc6LsiTOH6fTwvkG-5BBOn7WohtBik3qT7PslEGBEU", 0, CR_E_VERIFY);
+  until_err("exp top bit set", &keys[0], 1, "confirm-email", "user:42.800000006955b900.Ydc6LsiTOH6fTwvkG-5BBOn7WohtBik3qT7PslEGBEU", 0, CR_E_VERIFY);
+  until_err("exp all f", &keys[0], 1, "confirm-email", "user:42.ffffffffffffffff.Ydc6LsiTOH6fTwvkG-5BBOn7WohtBik3qT7PslEGBEU", 0, CR_E_VERIFY);
+  until_err("value flipped", &keys[0], 1, "confirm-email", "user:43.000000006955b900.Ydc6LsiTOH6fTwvkG-5BBOn7WohtBik3qT7PslEGBEU", 0, CR_E_VERIFY);
+
+  // Authenticity first: a bad SIG with a past expiry is VERIFY, not EXPIRED.
+  until_err("sig flipped, expired", &keys[0], 1, "confirm-email", "user:42.000000006955b900.Ydc6LsiTOH6fTwvkG-5BBOn7WohtBik3qT7PslEGBEF", exp0 + 1000, CR_E_VERIFY);
+  until_err("wrong purpose, expired", &keys[0], 1, "other", u1, exp0 + 1000, CR_E_VERIFY);
+  until_err("wrong key, expired", &keys[1], 1, "confirm-email", u1, exp0 + 1000, CR_E_VERIFY);
+
+  // Malformed.
+  until_err("until empty input", &keys[0], 1, "confirm-email", "", 0, CR_E_VERIFY);
+  until_err("until too short", &keys[0], 1, "confirm-email", ".000000006955b900.Ydc6LsiTOH6fTwvkG-5BBOn7WohtBik3qT7PslEGBE", 0, CR_E_VERIFY);
+  until_err("until first dot replaced", &keys[0], 1, "confirm-email", "user:42_000000006955b900.Ydc6LsiTOH6fTwvkG-5BBOn7WohtBik3qT7PslEGBEU", 0, CR_E_VERIFY);
+  until_err("until second dot replaced", &keys[0], 1, "confirm-email", "user:42.000000006955b900_Ydc6LsiTOH6fTwvkG-5BBOn7WohtBik3qT7PslEGBEU", 0, CR_E_VERIFY);
+  until_err("until sig with =", &keys[0], 1, "confirm-email", "user:42.000000006955b900.Ydc6LsiTOH6fTwvkG-5BBOn7WohtBik3qT7PslEGBE=", 0, CR_E_VERIFY);
+  until_err("until sig with +", &keys[0], 1, "confirm-email", "user:42.000000006955b900.Ydc6LsiTOH6fTwvkG+5BBOn7WohtBik3qT7PslEGBEU", 0, CR_E_VERIFY);
+  until_err("until sig truncated", &keys[0], 1, "confirm-email", "user:42.000000006955b900.Ydc6LsiTOH6fTwvkG-5BBOn7WohtBik3qT7PslEGBE", 0, CR_E_VERIFY);
+  until_err("until exp 15 digits", &keys[0], 1, "confirm-email", "user:42.00000006955b900.Ydc6LsiTOH6fTwvkG-5BBOn7WohtBik3qT7PslEGBEU", 0, CR_E_VERIFY);
+  until_err("until exp 17 digits", &keys[0], 1, "confirm-email", "user:42.0000000006955b900.Ydc6LsiTOH6fTwvkG-5BBOn7WohtBik3qT7PslEGBEU", 0, CR_E_VERIFY);
+
+  // Domain separation between the plain and the expiring form.
+  until_err("plain form as until", &keys[0], 1, "remember", v1, 0, CR_E_VERIFY);
+  until_err("plain v4 as until", &keys[0], 1, "remember", v4, 0, CR_E_VERIFY);
+  verify_fail("until form as plain", &keys[0], 1, "confirm-email", u1);
+  verify_fail("until u3 as plain", &keys[0], 1, "confirm-email", u3);
+  verify_fail("until as plain, value is rest", &keys[0], 1, "confirm-email", "user:42.000000006955b900.Ydc6LsiTOH6fTwvkG-5BBOn7WohtBik3qT7PslEGBEU");
+
+  // Capacity: exactly vlen + 61 works, one less is CR_E_SPACE.
+  var ubuf: uint8[96];
+  var un: int64 = 9;
+  tc_fill(&ubuf[0], 96, 7);
+  tc_rc("until cap exact", cr_signed_sign_until(&ubuf[0], 68, &un, &keys[0], "confirm-email", "user:42", exp0), CR_OK);
+  tc_ok("until cap exact len", un == 68);
+  tc_ok("until cap exact bytes", str_eq_buf(&ubuf[0], un, u1));
+  tc_ok("until cap exact no overrun", ubuf[68] == 7);
+  tc_fill(&ubuf[0], 96, 7);
+  un = 9;
+  tc_rc("until cap short", cr_signed_sign_until(&ubuf[0], 67, &un, &keys[0], "confirm-email", "user:42", exp0), CR_E_SPACE);
+  tc_ok("until cap short len 0", un == 0);
+  tc_ok("until cap short untouched", ubuf[0] == 7 && ubuf[67] == 7);
+  tc_rc("until cap negative", cr_signed_sign_until(&ubuf[0], -1, &un, &keys[0], "confirm-email", "", exp0), CR_E_SPACE);
+
+  // Argument checks for sign_until.
+  tc_rc("until sign null out_len", cr_signed_sign_until(&ubuf[0], 96, 0, &keys[0], "confirm-email", "a", exp0), CR_E_ARG);
+  un = 9;
+  tc_rc("until sign null out", cr_signed_sign_until(0, 96, &un, &keys[0], "confirm-email", "a", exp0), CR_E_ARG);
+  tc_ok("until sign null out len 0", un == 0);
+  un = 9;
+  tc_rc("until sign null key", cr_signed_sign_until(&ubuf[0], 96, &un, 0, "confirm-email", "a", exp0), CR_E_ARG);
+  tc_ok("until sign null key len 0", un == 0);
+  un = 9;
+  tc_rc("until sign empty purpose", cr_signed_sign_until(&ubuf[0], 96, &un, &keys[0], "", "a", exp0), CR_E_ARG);
+  tc_ok("until sign empty purpose len 0", un == 0);
+  un = 9;
+  tc_fill(&ubuf[0], 96, 7);
+  tc_rc("until sign expires -1", cr_signed_sign_until(&ubuf[0], 96, &un, &keys[0], "confirm-email", "a", -1), CR_E_ARG);
+  tc_ok("until sign expires -1 len 0", un == 0 && ubuf[0] == 7);
+
+  // Purpose length 255/256 for the expiring form.
+  var q255: uint8* = (uint8*)malloc(256);
+  var q256: uint8* = (uint8*)malloc(257);
+  tc_fill(q255, 255, 112);
+  tc_fill(q256, 256, 112);
+  var qs255: string = str_from_bytes((cstring)q255, 255);
+  var qs256: string = str_from_bytes((cstring)q256, 256);
+  un = 9;
+  tc_rc("until purpose 256", cr_signed_sign_until(&ubuf[0], 96, &un, &keys[0], qs256, "a", exp0), CR_E_ARG);
+  tc_ok("until purpose 256 len 0", un == 0);
+  tc_rc("until purpose 255", cr_signed_sign_until(&ubuf[0], 96, &un, &keys[0], qs255, "a", exp0), CR_OK);
+  tc_ok("until purpose 255 len", un == 62);
+  var usv255: string = str_from_bytes((cstring)&ubuf[0], un);
+  until_ok("until purpose 255", &keys[0], 1, qs255, usv255, exp0 - 1, "a", 0);
+  until_err("until purpose 255 vs 254", &keys[0], 1, str_from_bytes((cstring)q255, 254), usv255, exp0 - 1, CR_E_VERIFY);
+  var uv256: string = "x";
+  var uk256: int32 = 55;
+  tc_rc("until verify purpose 256", cr_signed_verify_until(&uv256, &uk256, &keys[0], 1, qs256, usv255, 0), CR_E_ARG);
+  tc_ok("until verify purpose 256 out", uv256 == "" && uk256 == -1);
+  tc_rc("until verify purpose empty", cr_signed_verify_until(&uv256, &uk256, &keys[0], 1, "", u1, 0), CR_E_ARG);
+  tc_ok("until verify purpose empty out", uv256 == "" && uk256 == -1);
+  free(q255);
+  free(q256);
+
+  // Argument checks for verify_until.
+  var uvv: string = "x";
+  var uki: int32 = 55;
+  tc_rc("until verify nkeys 0", cr_signed_verify_until(&uvv, &uki, &keys[0], 0, "confirm-email", u1, 0), CR_E_ARG);
+  tc_ok("until verify nkeys 0 out", uvv == "" && uki == -1);
+  uvv = "x";
+  uki = 55;
+  tc_rc("until verify nkeys 9", cr_signed_verify_until(&uvv, &uki, &keys[0], 9, "confirm-email", u1, 0), CR_E_ARG);
+  tc_ok("until verify nkeys 9 out", uvv == "" && uki == -1);
+  uvv = "x";
+  uki = 55;
+  tc_rc("until verify null keys", cr_signed_verify_until(&uvv, &uki, 0, 1, "confirm-email", u1, 0), CR_E_ARG);
+  tc_ok("until verify null keys out", uvv == "" && uki == -1);
+  tc_rc("until verify null out_value", cr_signed_verify_until(0, &uki, &keys[0], 1, "confirm-email", u1, 0), CR_E_ARG);
+
+  // A value containing '.' round-trips; so do large and edge expiries.
+  var dn: int64 = 0;
+  var dbuf: uint8[96];
+  tc_rc("dotted sign", cr_signed_sign_until(&dbuf[0], 96, &dn, &keys[0], "confirm-email", "a.b.c", exp0), CR_OK);
+  tc_ok("dotted len", dn == 66);
+  var dsv: string = str_from_bytes((cstring)&dbuf[0], dn);
+  until_ok("dotted", &keys[0], 1, "confirm-email", dsv, exp0 - 1, "a.b.c", 0);
+  until_err("dotted expired", &keys[0], 1, "confirm-email", dsv, exp0, CR_E_EXPIRED);
+  var big: int64 = 9223372036854775807;
+  tc_rc("max expiry sign", cr_signed_sign_until(&dbuf[0], 96, &dn, &keys[0], "confirm-email", "a", big), CR_OK);
+  tc_ok("max expiry exp text", dbuf[2] == 55 && dbuf[3] == 102 && dbuf[17] == 102 && dbuf[18] == 46);
+  var bsv: string = str_from_bytes((cstring)&dbuf[0], dn);
+  until_ok("max expiry", &keys[0], 1, "confirm-email", bsv, big - 1, "a", 0);
+  until_err("max expiry at limit", &keys[0], 1, "confirm-email", bsv, big, CR_E_EXPIRED);
+
+  // Eight keys: the last one still matches the expiring form.
+  var usv8: uint8[96];
+  var un8: int64 = 0;
+  tc_rc("until sign with key 7", cr_signed_sign_until(&usv8[0], 96, &un8, &many[7], "confirm-email", "u", exp0), CR_OK);
+  until_ok("until key 7 of 8", &many[0], 8, "confirm-email", str_from_bytes((cstring)&usv8[0], un8), exp0 - 1, "u", 7);
+
+  return tc_finish("signed");
+}

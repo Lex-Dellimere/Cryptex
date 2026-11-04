@@ -1,0 +1,385 @@
+// token: format, alphabet membership, distribution, check, errors, bits, hash;
+// codes: generation, normalization, pepper hashing.
+import "std/conv";
+import "crypto/status";
+import "crypto/types";
+import "crypto/core";
+import "crypto/token";
+import "tcheck";
+
+var A62: string = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+var A32: string = "0123456789abcdefghjkmnpqrstvwxyz";
+
+fn in_set(c: uint8, a: string) -> bool {
+  var i: int64 = 0;
+  while (i < (int64)a.length) {
+    if (a.chars[i] == c) { return true; }
+    i = i + 1;
+  }
+  return false;
+}
+
+// Generates one token and checks its shape; returns its text (a view of buf).
+fn shape(buf: uint8*, label: string, prefix: string, alpha: int32, aset: string, nchars: int64) -> string {
+  var n: int64 = 77;
+  var plen: int64 = (int64)prefix.length;
+  tc_rc(label + " rc", cr_token_new(buf, 300, &n, prefix, alpha, nchars), CR_OK);
+  tc_ok(label + " length", n == plen + nchars);
+  tc_ok(label + " nul", buf[n] == 0);
+  var tok: string = str_from_bytes((cstring)buf, n);
+  var starts: bool = true;
+  var i: int64 = 0;
+  while (i < plen) {
+    if (buf[i] != prefix.chars[i]) { starts = false; }
+    i = i + 1;
+  }
+  tc_ok(label + " prefix", starts);
+  var inset: bool = true;
+  while (i < n) {
+    if (!in_set(buf[i], aset)) { inset = false; }
+    i = i + 1;
+  }
+  tc_ok(label + " alphabet", inset);
+  tc_ok(label + " check", cr_token_check(tok, prefix, alpha, nchars));
+  return tok;
+}
+
+// Generates tokens until at least `want` random chars exist; every character
+// of the alphabet must have appeared.
+fn coverage(label: string, alpha: int32, aset: string, nchars: int64, want: int64) {
+  var seen: int32[256];
+  var total: int64 = 0;
+  var buf: uint8[64];
+  var n: int64 = 0;
+  var allok: bool = true;
+  while (total < want) {
+    var rc: int32 = cr_token_new(&buf[0], 64, &n, "", alpha, nchars);
+    if (rc != CR_OK) { allok = false; total = want; }
+    var i: int64 = 0;
+    while (i < n) {
+      seen[(int64)buf[i]] = seen[(int64)buf[i]] + 1;
+      i = i + 1;
+    }
+    total = total + n;
+  }
+  tc_ok(label + " generated", allok);
+  var missing: int32 = 0;
+  var j: int64 = 0;
+  while (j < (int64)aset.length) {
+    if (seen[(int64)aset.chars[j]] == 0) { missing = missing + 1; }
+    j = j + 1;
+  }
+  tc_ok(label + " every character seen", missing == 0);
+}
+
+fn new_rc(label: string, prefix: string, alpha: int32, nchars: int64, cap: int64, want: int32) {
+  var buf: uint8[300];
+  var n: int64 = 77;
+  tc_rc(label, cr_token_new(&buf[0], cap, &n, prefix, alpha, nchars), want);
+  tc_ok(label + " no length", n == 0);
+}
+
+// Do the first n bytes of p spell s (and is n its length)?
+fn bytes_are(p: uint8*, n: int64, s: string) -> bool {
+  if (n != (int64)s.length) { return false; }
+  var i: int64 = 0;
+  while (i < n) {
+    if (p[i] != s.chars[i]) { return false; }
+    i = i + 1;
+  }
+  return true;
+}
+
+// Shape of a generated code: total length, a '-' exactly at every
+// (group+1)-th position, every other byte in the alphabet, a nul after.
+fn code_shape(label: string, nchars: int64, group: int64, total: int64) {
+  var buf: uint8[64];
+  var n: int64 = 77;
+  tc_rc(label + " rc", cr_code_new(&buf[0], 64, &n, nchars, group), CR_OK);
+  tc_ok(label + " length", n == total);
+  tc_ok(label + " nul", buf[total] == 0);
+  var dashok: bool = true;
+  var inset: bool = true;
+  var chars: int64 = 0;
+  var i: int64 = 0;
+  while (i < total) {
+    var isdash: bool = group > 0 && (i + 1) % (group + 1) == 0;
+    if (isdash) {
+      if (buf[i] != 45) { dashok = false; }
+    } else {
+      chars = chars + 1;
+      if (!in_set(buf[i], A32)) { inset = false; }
+    }
+    i = i + 1;
+  }
+  tc_ok(label + " dashes", dashok);
+  tc_ok(label + " alphabet", inset);
+  tc_ok(label + " char count", chars == nchars);
+}
+
+fn code_new_rc(label: string, nchars: int64, group: int64, want: int32) {
+  var buf: uint8[64];
+  var n: int64 = 77;
+  tc_rc(label, cr_code_new(&buf[0], 64, &n, nchars, group), want);
+  tc_ok(label + " no length", n == 0);
+}
+
+// Normalizes input; expects CR_OK and the exact text want.
+fn norm_ok(label: string, input: string, want: string) {
+  var buf: uint8[64];
+  var n: int64 = 77;
+  tc_rc(label + " rc", cr_code_normalize(&buf[0], 64, &n, input), CR_OK);
+  tc_ok(label + " text", bytes_are(&buf[0], n, want));
+  tc_ok(label + " nul", buf[n] == 0);
+}
+
+// Normalizes input into a 64-byte buffer pre-filled with 7; expects status
+// want, length 0 and the whole buffer wiped.
+fn norm_err(label: string, input: string, cap: int64, want: int32) {
+  var buf: uint8[64];
+  tc_fill(&buf[0], 64, 7);
+  var n: int64 = 77;
+  tc_rc(label + " rc", cr_code_normalize(&buf[0], cap, &n, input), want);
+  tc_ok(label + " no length", n == 0);
+  tc_ok(label + " wiped", tc_all_zero(&buf[0], cap));
+}
+
+fn main() -> int32 {
+  var b1: uint8[300];
+  var b2: uint8[300];
+  var b4: uint8[300];
+  var b5: uint8[300];
+  var b7: uint8[300];
+  var t62: string = shape(&b1[0], "base62", "mtlr_", CR_TOKEN_BASE62, A62, 40);
+  tc_ok("base62 total length", (int64)t62.length == 45);
+  var t32: string = shape(&b2[0], "base32", "", CR_TOKEN_BASE32, A32, 26);
+  var t62b: string = shape(&b4[0], "base62 again", "mtlr_", CR_TOKEN_BASE62, A62, 40);
+  tc_ok("consecutive tokens differ", t62 != t62b);
+  var t32b: string = shape(&b5[0], "base32 again", "", CR_TOKEN_BASE32, A32, 26);
+  tc_ok("consecutive base32 differ", t32 != t32b);
+  shape(&b7[0], "max chars", "p-", CR_TOKEN_BASE62, A62, 256);
+  shape(&b7[0], "min chars base62", "", CR_TOKEN_BASE62, A62, 22);
+  shape(&b7[0], "min chars base32", "", CR_TOKEN_BASE32, A32, 26);
+  shape(&b7[0], "max prefix", "abcdefghijklmnopqrstuvwxyz_-0123", CR_TOKEN_BASE32, A32, 26);
+
+  coverage("base62 distribution", CR_TOKEN_BASE62, A62, 40, 4000);
+  coverage("base32 distribution", CR_TOKEN_BASE32, A32, 26, 2000);
+
+  // check: accepts and rejects (22 base62 characters = 130 bits)
+  tc_ok("check accepts fixed", cr_token_check("mtlr_0123456789abcdefghijkl", "mtlr_", CR_TOKEN_BASE62, 22));
+  tc_ok("check wrong prefix", !cr_token_check("mtlx_0123456789abcdefghijkl", "mtlr_", CR_TOKEN_BASE62, 22));
+  tc_ok("check no prefix", !cr_token_check("0123456789abcdefghijkl", "mtlr_", CR_TOKEN_BASE62, 22));
+  tc_ok("check one short", !cr_token_check("mtlr_0123456789abcdefghijk", "mtlr_", CR_TOKEN_BASE62, 22));
+  tc_ok("check one long", !cr_token_check("mtlr_0123456789abcdefghijklm", "mtlr_", CR_TOKEN_BASE62, 22));
+  tc_ok("check empty", !cr_token_check("", "mtlr_", CR_TOKEN_BASE62, 22));
+  tc_ok("check base62 dash", !cr_token_check("mtlr_01234-6789abcdefghijkl", "mtlr_", CR_TOKEN_BASE62, 22));
+  tc_ok("check base62 underscore", !cr_token_check("mtlr_01234_6789abcdefghijkl", "mtlr_", CR_TOKEN_BASE62, 22));
+  tc_ok("check base62 21 chars", !cr_token_check("mtlr_0123456789abcdefghijk", "mtlr_", CR_TOKEN_BASE62, 21));
+  tc_ok("check base32 accepts", cr_token_check("0123456789abcdefghjkmnpqrstvwxyz", "", CR_TOKEN_BASE32, 32));
+  tc_ok("check base32 26 accepts", cr_token_check("0123456789abcdefghjkmnpqrs", "", CR_TOKEN_BASE32, 26));
+  tc_ok("check base32 25 chars", !cr_token_check("0123456789abcdefghjkmnpqr", "", CR_TOKEN_BASE32, 25));
+  tc_ok("check base32 u", !cr_token_check("0123456789abcdefghjkmnpqru", "", CR_TOKEN_BASE32, 26));
+  tc_ok("check base32 i", !cr_token_check("0123456789abcdefghjkmnpqri", "", CR_TOKEN_BASE32, 26));
+  tc_ok("check base32 l", !cr_token_check("0123456789abcdefghjkmnpqrl", "", CR_TOKEN_BASE32, 26));
+  tc_ok("check base32 o", !cr_token_check("0123456789abcdefghjkmnpqro", "", CR_TOKEN_BASE32, 26));
+  tc_ok("check base32 upper A", !cr_token_check("0123456789abcdefghjkmnpqrA", "", CR_TOKEN_BASE32, 26));
+  tc_ok("check unknown alphabet 0", !cr_token_check("0123456789abcdefghijkl", "", 0, 22));
+  tc_ok("check alphabet 3", !cr_token_check("0123456789abcdefghijkl", "", 3, 22));
+  tc_ok("check alphabet 4", !cr_token_check("0123456789abcdefghijkl", "", 4, 22));
+  tc_ok("check nchars 7", !cr_token_check("0123456", "", CR_TOKEN_BASE62, 7));
+  tc_ok("check nchars 257", !cr_token_check(t62, "", CR_TOKEN_BASE62, 257));
+
+  // new: errors
+  new_rc("prefix with dot", "a.b", CR_TOKEN_BASE62, 22, 64, CR_E_ARG);
+  new_rc("prefix with space", "a b", CR_TOKEN_BASE62, 22, 64, CR_E_ARG);
+  new_rc("prefix 33 bytes", "abcdefghijklmnopqrstuvwxyz_-01234", CR_TOKEN_BASE62, 22, 300, CR_E_ARG);
+  new_rc("nchars 7", "", CR_TOKEN_BASE62, 7, 64, CR_E_ARG);
+  new_rc("nchars 257", "", CR_TOKEN_BASE62, 257, 300, CR_E_ARG);
+  new_rc("alphabet 0", "", 0, 22, 64, CR_E_ARG);
+  new_rc("alphabet 3", "", 3, 22, 64, CR_E_ARG);
+  new_rc("alphabet 4", "", 4, 22, 64, CR_E_ARG);
+  new_rc("base62 21 chars", "", CR_TOKEN_BASE62, 21, 64, CR_E_ARG);
+  new_rc("base32 25 chars", "", CR_TOKEN_BASE32, 25, 64, CR_E_ARG);
+  var okb: uint8[64];
+  var okn: int64 = 0;
+  tc_rc("base62 22 chars", cr_token_new(&okb[0], 64, &okn, "", CR_TOKEN_BASE62, 22), CR_OK);
+  tc_ok("base62 22 chars length", okn == 22);
+  tc_rc("base32 26 chars", cr_token_new(&okb[0], 64, &okn, "", CR_TOKEN_BASE32, 26), CR_OK);
+  tc_ok("base32 26 chars length", okn == 26);
+  new_rc("space need-1", "mtlr_", CR_TOKEN_BASE62, 40, 45, CR_E_SPACE);
+  new_rc("space zero cap", "", CR_TOKEN_BASE32, 26, 0, CR_E_SPACE);
+  var xb: uint8[64];
+  var xn: int64 = 0;
+  tc_rc("exact fit", cr_token_new(&xb[0], 46, &xn, "mtlr_", CR_TOKEN_BASE62, 40), CR_OK);
+  tc_ok("exact fit length", xn == 45 && xb[45] == 0);
+  // nothing written on CR_E_SPACE
+  var guard: uint8[64];
+  tc_fill(&guard[0], 64, 7);
+  var gn: int64 = 0;
+  tc_rc("space guard rc", cr_token_new(&guard[0], 45, &gn, "mtlr_", CR_TOKEN_BASE62, 40), CR_E_SPACE);
+  tc_ok("space writes nothing", guard[0] == 7 && guard[44] == 7);
+  var nb: uint8[64];
+  tc_rc("null out_len", cr_token_new(&nb[0], 64, 0, "", CR_TOKEN_BASE62, 22), CR_E_ARG);
+  var nn: int64 = 77;
+  tc_rc("null out", cr_token_new(0, 64, &nn, "", CR_TOKEN_BASE62, 22), CR_E_ARG);
+  tc_ok("null out no length", nn == 0);
+
+  // bits
+  tc_ok("bits base62 22", cr_token_bits(CR_TOKEN_BASE62, 22) == 130);
+  tc_ok("bits base62 21", cr_token_bits(CR_TOKEN_BASE62, 21) == 125);
+  tc_ok("bits base62 40", cr_token_bits(CR_TOKEN_BASE62, 40) == 238);
+  tc_ok("bits base62 1", cr_token_bits(CR_TOKEN_BASE62, 1) == 5);
+  tc_ok("bits base62 256", cr_token_bits(CR_TOKEN_BASE62, 256) == 1524);
+  tc_ok("bits base32 26", cr_token_bits(CR_TOKEN_BASE32, 26) == 130);
+  tc_ok("bits base32 10", cr_token_bits(CR_TOKEN_BASE32, 10) == 50);
+  tc_ok("bits base62 0", cr_token_bits(CR_TOKEN_BASE62, 0) == -1);
+  tc_ok("bits base62 257", cr_token_bits(CR_TOKEN_BASE62, 257) == -1);
+  tc_ok("bits alphabet 0", cr_token_bits(0, 22) == -1);
+  tc_ok("bits alphabet 3", cr_token_bits(3, 22) == -1);
+  tc_ok("bits alphabet 4", cr_token_bits(4, 22) == -1);
+  tc_ok("min bits", CR_TOKEN_MIN_BITS == 128);
+
+  // hash
+  var d: CrSha256;
+  tc_rc("hash rc", cr_token_hash(&d, "mtlr_abc123"), CR_OK);
+  tc_hex_eq("hash vector", &d.b[0], 32, "13ef5275390bb05130708bef7d481915ea66d78eda2e5672152ae8a07b223065");
+  tc_rc("hash null out", cr_token_hash(0, "mtlr_abc123"), CR_E_ARG);
+
+  // codes: generation
+  code_shape("code 10/5", 10, 5, 11);
+  code_shape("code 10/0", 10, 0, 10);
+  code_shape("code 32/4", 32, 4, 39);
+  code_shape("code 8/16", 8, 16, 8);
+  code_shape("code 10/16", 10, 16, 10);
+  code_shape("code 17/16", 17, 16, 18);
+  code_shape("code 9/2", 9, 2, 13);
+  var c1: uint8[64];
+  var c1n: int64 = 0;
+  cr_code_new(&c1[0], 64, &c1n, 10, 5);
+  tc_ok("code dash at 5", c1[5] == 45 && c1n == 11 && c1[11] == 0);
+  var c2: uint8[64];
+  var c2n: int64 = 0;
+  cr_code_new(&c2[0], 64, &c2n, 10, 5);
+  tc_ok("consecutive codes differ", !bytes_are(&c2[0], c2n, str_from_bytes((cstring)&c1[0], c1n)));
+  code_new_rc("code nchars 7", 7, 0, CR_E_ARG);
+  code_new_rc("code nchars 33", 33, 0, CR_E_ARG);
+  code_new_rc("code group 1", 10, 1, CR_E_ARG);
+  code_new_rc("code group 17", 10, 17, CR_E_ARG);
+  code_new_rc("code group -1", 10, -1, CR_E_ARG);
+  var cb: uint8[64];
+  var cn: int64 = 77;
+  tc_rc("code null out_len", cr_code_new(&cb[0], 64, 0, 10, 5), CR_E_ARG);
+  tc_rc("code null out", cr_code_new(0, 64, &cn, 10, 5), CR_E_ARG);
+  tc_ok("code null out no length", cn == 0);
+  // out_cap = total is one byte short for the nul
+  var cg: uint8[64];
+  tc_fill(&cg[0], 64, 7);
+  var cgn: int64 = 77;
+  tc_rc("code space rc", cr_code_new(&cg[0], 11, &cgn, 10, 5), CR_E_SPACE);
+  tc_ok("code space no length", cgn == 0);
+  tc_ok("code space writes nothing", cg[0] == 7 && cg[10] == 7);
+  tc_rc("code exact fit", cr_code_new(&cg[0], 12, &cgn, 10, 5), CR_OK);
+  tc_ok("code exact fit length", cgn == 11 && cg[11] == 0);
+  tc_rc("code zero cap", cr_code_new(&cg[0], 0, &cgn, 10, 0), CR_E_SPACE);
+  // distribution: 200 codes of 10 characters, every alphabet character appears
+  var dseen: int32[256];
+  var dbuf: uint8[16];
+  var dn: int64 = 0;
+  var dall: bool = true;
+  var q: int64 = 0;
+  while (q < 200) {
+    if (cr_code_new(&dbuf[0], 16, &dn, 10, 0) != CR_OK) { dall = false; }
+    var w: int64 = 0;
+    while (w < dn) {
+      dseen[(int64)dbuf[w]] = dseen[(int64)dbuf[w]] + 1;
+      w = w + 1;
+    }
+    q = q + 1;
+  }
+  tc_ok("code distribution generated", dall);
+  var dmissing: int32 = 0;
+  var dj: int64 = 0;
+  while (dj < (int64)A32.length) {
+    if (dseen[(int64)A32.chars[dj]] == 0) { dmissing = dmissing + 1; }
+    dj = dj + 1;
+  }
+  tc_ok("code every character seen", dmissing == 0);
+
+  // codes: normalize
+  norm_ok("norm upper dash I", "ABCDE-I2345", "abcde12345");
+  norm_ok("norm space", "abcde 12345", "abcde12345");
+  norm_ok("norm look-alikes", "OoLl0-1abcd", "001101abcd");
+  norm_ok("norm already canonical", "abcde12345", "abcde12345");
+  norm_ok("norm 8 chars", "abcd1234", "abcd1234");
+  norm_ok("norm 32 chars", "0123456789abcdefghjkmnpqrstvwxyz", "0123456789abcdefghjkmnpqrstvwxyz");
+  norm_ok("norm many separators", " A-B C-D-E 1-2 3 4 ", "abcde1234");
+  norm_err("norm u", "abcde-u2345", 64, CR_E_DECODE);
+  norm_err("norm U", "ABCDEU2345", 64, CR_E_DECODE);
+  norm_err("norm bad byte", "abcde+12345", 64, CR_E_DECODE);
+  norm_err("norm 7 chars", "abc-1234", 64, CR_E_DECODE);
+  norm_err("norm empty", "", 64, CR_E_DECODE);
+  norm_err("norm 33 chars", "0123456789abcdefghjkmnpqrstvwxyz0", 64, CR_E_DECODE);
+  norm_err("norm small cap", "abcde12345", 10, CR_E_SPACE);
+  norm_err("norm zero cap", "abcde12345", 0, CR_E_SPACE);
+  var nm: uint8[16];
+  var nmn: int64 = 77;
+  tc_rc("norm exact fit", cr_code_normalize(&nm[0], 11, &nmn, "abcde12345"), CR_OK);
+  tc_ok("norm exact fit text", bytes_are(&nm[0], nmn, "abcde12345") && nm[10] == 0);
+  tc_rc("norm null out_len", cr_code_normalize(&nm[0], 16, 0, "abcde12345"), CR_E_ARG);
+  nmn = 77;
+  tc_rc("norm null out", cr_code_normalize(0, 16, &nmn, "abcde12345"), CR_E_ARG);
+  tc_ok("norm null out no length", nmn == 0);
+
+  // codes: hash
+  var k0: CrKey32;
+  var k1: CrKey32;
+  var ki: int32 = 0;
+  while (ki < 32) {
+    k0.b[ki] = (uint8)ki;
+    k1.b[ki] = (uint8)(ki + 32);
+    ki = ki + 1;
+  }
+  var h: CrHmacSha256;
+  tc_rc("code hash typed rc", cr_code_hash(&h, &k0, "ABCDE-I2345"), CR_OK);
+  tc_hex_eq("code hash typed", &h.b[0], 32, "27669a33d6445944f539b7f0a13bcc0ebd4df2e3a76dac28bfb647941f18da42");
+  var h2: CrHmacSha256;
+  tc_rc("code hash canonical rc", cr_code_hash(&h2, &k0, "abcde12345"), CR_OK);
+  tc_hex_eq("code hash canonical", &h2.b[0], 32, "27669a33d6445944f539b7f0a13bcc0ebd4df2e3a76dac28bfb647941f18da42");
+  var h3: CrHmacSha256;
+  tc_rc("code hash pepper 2 rc", cr_code_hash(&h3, &k1, "ABCDE-I2345"), CR_OK);
+  tc_hex_eq("code hash pepper 2", &h3.b[0], 32, "fa9e9627b133467505d0a2bcb32e983335a367f04d0c87bdface070feb98d998");
+  var h4: CrHmacSha256;
+  tc_rc("code hash pepper 2 canonical rc", cr_code_hash(&h4, &k1, "abcde12345"), CR_OK);
+  tc_ok("code hash pepper 2 canonical", cr_equal(&h3.b[0], &h4.b[0], 32));
+  var h5: CrHmacSha256;
+  tc_fill(&h5.b[0], 32, 7);
+  tc_rc("code hash bad byte", cr_code_hash(&h5, &k0, "abcde-u2345"), CR_E_DECODE);
+  tc_ok("code hash bad byte out wiped", tc_all_zero(&h5.b[0], 32));
+  tc_fill(&h5.b[0], 32, 7);
+  tc_rc("code hash too short", cr_code_hash(&h5, &k0, "abc-1234"), CR_E_DECODE);
+  tc_ok("code hash too short out wiped", tc_all_zero(&h5.b[0], 32));
+  tc_rc("code hash null pepper", cr_code_hash(&h5, 0, "abcde12345"), CR_E_ARG);
+  tc_rc("code hash null out", cr_code_hash(0, &k0, "abcde12345"), CR_E_ARG);
+
+  // a generated code round-trips through its uppercase form
+  var gc: uint8[64];
+  var gcn: int64 = 0;
+  tc_rc("round trip new", cr_code_new(&gc[0], 64, &gcn, 10, 5), CR_OK);
+  var up: uint8[64];
+  var ui: int64 = 0;
+  while (ui < gcn) {
+    var ch: uint8 = gc[ui];
+    if (ch >= 97 && ch <= 122) { ch = (uint8)((int32)ch - 32); }
+    up[ui] = ch;
+    ui = ui + 1;
+  }
+  up[gcn] = 0;
+  var rh1: CrHmacSha256;
+  var rh2: CrHmacSha256;
+  tc_rc("round trip hash 1", cr_code_hash(&rh1, &k0, str_from_bytes((cstring)&gc[0], gcn)), CR_OK);
+  tc_rc("round trip hash 2", cr_code_hash(&rh2, &k0, str_from_bytes((cstring)&up[0], gcn)), CR_OK);
+  tc_ok("round trip equal", cr_equal(&rh1.b[0], &rh2.b[0], 32));
+  tc_ok("round trip hash is not zero", !tc_all_zero(&rh1.b[0], 32));
+
+  return tc_finish("token");
+}

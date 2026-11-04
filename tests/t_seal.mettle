@@ -1,0 +1,145 @@
+// Sealed messages (nonce || ciphertext || tag): the layout checked with
+// cr_aead_decrypt, the version byte, the draft-irtf-cfrg-xchacha A.3.1
+// vector (rejected: its nonce does not start with version 1), round trips, fresh nonces, fail-closed
+// opening (tamper, wrong ad/key, short input, capacity) and argument checks.
+import "crypto/status";
+import "crypto/types";
+import "crypto/core";
+import "crypto/aead";
+import "crypto/seal";
+import "tcheck";
+
+fn main() -> int32 {
+  var key: CrKey32;
+  var ad: uint8[12];
+  tc_unhex("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f", &key.b[0], 32);
+  tc_unhex("50515253c0c1c2c3c4c5c6c7", &ad[0], 12);
+  var pt: string = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
+  var mlen: int64 = (int64)pt.length;
+
+  // A.3.1 laid out as nonce || ciphertext || tag: a valid XChaCha message,
+  // but its nonce starts with 0x40, not version 1, so cr_open refuses it.
+  var sv: uint8[200];
+  tc_unhex("404142434445464748494a4b4c4d4e4f5051525354555657", &sv[0], 24);
+  tc_unhex("bd6d179d3e83d43b9576579493c0e939572a1700252bfaccbed2902c21396cbb731c7f1b0b4aa6440bf3a82f4eda7e39ae64c6708c54c216cb96b72e1213b4522f8c9ba40db5d945b11b69b982c1bb9e3f3fac2bc369488f76b2383565d3fff921f9664c97637da9768812f615c68b13b52e", &sv[24], mlen);
+  tc_unhex("c0875924c1c7987947deafd8780acf49", &sv[24 + mlen], 16);
+  var slen: int64 = mlen + CR_SEAL_OVERHEAD;
+  var out: uint8[200];
+  var olen: int64 = 99;
+  tc_ok("overhead", CR_SEAL_OVERHEAD == 40);
+  tc_rc("A.3.1 other version", cr_open(&out[0], 200, &olen, &sv[0], slen, &ad[0], 12, &key), CR_E_VERIFY);
+  tc_ok("A.3.1 other version: wiped", olen == 0 && tc_all_zero(&out[0], 200));
+  // With the version byte set, the same bytes are a different nonce: the tag fails.
+  sv[0] = (uint8)CR_SEAL_VERSION;
+  tc_rc("A.3.1 version patched", cr_open(&out[0], 200, &olen, &sv[0], slen, &ad[0], 12, &key), CR_E_VERIFY);
+
+  // Round trip with ad.
+  var k2: CrKey32;
+  tc_rc("keygen", cr_aead_keygen(&k2), CR_OK);
+  var box: uint8[200];
+  var blen: int64 = 0;
+  tc_rc("seal", cr_seal(&box[0], 200, &blen, pt.chars, mlen, &ad[0], 12, &k2), CR_OK);
+  tc_ok("seal length", blen == mlen + 40);
+  tc_rc("open", cr_open(&out[0], 200, &olen, &box[0], blen, &ad[0], 12, &k2), CR_OK);
+  tc_ok("round trip", olen == mlen && cr_equal(&out[0], pt.chars, mlen));
+  // Layout: version byte, then the nonce and ciphertext cr_aead_decrypt accepts.
+  tc_ok("version byte", box[0] == (uint8)CR_SEAL_VERSION);
+  var bn: CrNonce24;
+  for i in 0..24 {
+    bn.b[i] = box[i];
+  }
+  var lo: uint8[200];
+  var lol: int64 = 0;
+  tc_rc("layout via aead", cr_aead_decrypt(&lo[0], 200, &lol, &box[24], blen - 24, &ad[0], 12, &bn, &k2), CR_OK);
+  tc_ok("layout plaintext", lol == mlen && cr_equal(&lo[0], pt.chars, mlen));
+
+  // Exact capacities.
+  var exact: uint8[200];
+  var elen: int64 = 0;
+  tc_rc("seal exact cap", cr_seal(&exact[0], slen, &elen, pt.chars, mlen, 0, 0, &k2), CR_OK);
+  tc_rc("open exact cap", cr_open(&out[0], mlen, &olen, &exact[0], elen, 0, 0, &k2), CR_OK);
+  tc_ok("exact round trip", olen == mlen && cr_equal(&out[0], pt.chars, mlen));
+
+  // Empty message.
+  var eb: uint8[48];
+  var el: int64 = 0;
+  tc_rc("seal empty", cr_seal(&eb[0], 48, &el, 0, 0, 0, 0, &k2), CR_OK);
+  tc_ok("empty sealed length", el == 40);
+  olen = 77;
+  tc_rc("open empty", cr_open(&out[0], 0, &olen, &eb[0], el, 0, 0, &k2), CR_OK);
+  tc_ok("empty opened length", olen == 0);
+
+  // Fresh nonce for every seal.
+  var box2: uint8[200];
+  var blen2: int64 = 0;
+  tc_rc("seal again", cr_seal(&box2[0], 200, &blen2, pt.chars, mlen, &ad[0], 12, &k2), CR_OK);
+  tc_ok("nonces differ", !cr_equal(&box[0], &box2[0], 24));
+  tc_ok("sealed messages differ", !cr_equal(&box[0], &box2[0], blen));
+
+  // Tampering: each gives CR_E_VERIFY, length 0, wiped output.
+  tc_fill(&out[0], 200, 255);
+  olen = 99;
+  box[3] = box[3] ^ 1;
+  tc_rc("tampered nonce", cr_open(&out[0], 200, &olen, &box[0], blen, &ad[0], 12, &k2), CR_E_VERIFY);
+  tc_ok("tampered nonce: no length", olen == 0);
+  tc_ok("tampered nonce: output wiped", tc_all_zero(&out[0], 200));
+  box[3] = box[3] ^ 1;
+
+  tc_fill(&out[0], 200, 255);
+  olen = 99;
+  box[30] = box[30] ^ 1;
+  tc_rc("tampered ciphertext", cr_open(&out[0], 200, &olen, &box[0], blen, &ad[0], 12, &k2), CR_E_VERIFY);
+  tc_ok("tampered ciphertext: no length", olen == 0);
+  tc_ok("tampered ciphertext: output wiped", tc_all_zero(&out[0], 200));
+  box[30] = box[30] ^ 1;
+
+  tc_fill(&out[0], 200, 255);
+  olen = 99;
+  box[blen - 1] = box[blen - 1] ^ 128;
+  tc_rc("tampered tag", cr_open(&out[0], 200, &olen, &box[0], blen, &ad[0], 12, &k2), CR_E_VERIFY);
+  tc_ok("tampered tag: no length", olen == 0);
+  tc_ok("tampered tag: output wiped", tc_all_zero(&out[0], 200));
+  box[blen - 1] = box[blen - 1] ^ 128;
+
+  tc_fill(&out[0], 200, 255);
+  olen = 99;
+  ad[0] = ad[0] ^ 1;
+  tc_rc("changed ad", cr_open(&out[0], 200, &olen, &box[0], blen, &ad[0], 12, &k2), CR_E_VERIFY);
+  tc_ok("changed ad: no length", olen == 0);
+  tc_ok("changed ad: output wiped", tc_all_zero(&out[0], 200));
+  ad[0] = ad[0] ^ 1;
+
+  tc_fill(&out[0], 200, 255);
+  olen = 99;
+  k2.b[31] = k2.b[31] ^ 1;
+  tc_rc("wrong key", cr_open(&out[0], 200, &olen, &box[0], blen, &ad[0], 12, &k2), CR_E_VERIFY);
+  tc_ok("wrong key: no length", olen == 0);
+  tc_ok("wrong key: output wiped", tc_all_zero(&out[0], 200));
+  k2.b[31] = k2.b[31] ^ 1;
+  tc_rc("open still ok after failures", cr_open(&out[0], 200, &olen, &box[0], blen, &ad[0], 12, &k2), CR_OK);
+
+  // Short input, capacity.
+  tc_fill(&out[0], 200, 255);
+  olen = 99;
+  tc_rc("slen 39", cr_open(&out[0], 200, &olen, &box[0], 39, 0, 0, &k2), CR_E_VERIFY);
+  tc_ok("slen 39: no length", olen == 0);
+  tc_ok("slen 39: output wiped", tc_all_zero(&out[0], 200));
+  tc_fill(&exact[0], 200, 255);
+  elen = 99;
+  tc_rc("seal space", cr_seal(&exact[0], mlen + 39, &elen, pt.chars, mlen, 0, 0, &k2), CR_E_SPACE);
+  tc_ok("seal space: no length", elen == 0);
+  tc_rc("open space", cr_open(&out[0], slen - 41, &olen, &box[0], blen, &ad[0], 12, &k2), CR_E_SPACE);
+  tc_ok("open space: no length", olen == 0);
+
+  // Argument errors.
+  tc_rc("seal null key", cr_seal(&box2[0], 200, &blen2, pt.chars, mlen, 0, 0, 0), CR_E_ARG);
+  tc_rc("seal null out_len", cr_seal(&box2[0], 200, 0, pt.chars, mlen, 0, 0, &k2), CR_E_ARG);
+  tc_rc("seal negative mlen", cr_seal(&box2[0], 200, &blen2, pt.chars, -1, 0, 0, &k2), CR_E_ARG);
+  tc_rc("seal null msg", cr_seal(&box2[0], 200, &blen2, 0, 5, 0, 0, &k2), CR_E_ARG);
+  tc_ok("seal arg: no length", blen2 == 0);
+  tc_rc("open null key", cr_open(&out[0], 200, &olen, &box[0], blen, &ad[0], 12, 0), CR_E_ARG);
+  tc_rc("open null out_len", cr_open(&out[0], 200, 0, &box[0], blen, &ad[0], 12, &k2), CR_E_ARG);
+
+  cr_wipe(&k2.b[0], 32);
+  return tc_finish("seal");
+}

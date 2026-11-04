@@ -14,6 +14,9 @@ fn project() {
   mb_bin("t_pwhash", "t_pwhash.mettle");
   mb_bin("t_encode", "t_encode.mettle");
   mb_bin("t_random", "t_random.mettle");
+  mb_bin("t_signed", "t_signed.mettle");
+  mb_bin("t_token", "t_token.mettle");
+  mb_bin("t_seal", "t_seal.mettle");
 }
 
 fn deps() {
