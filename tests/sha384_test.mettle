@@ -2,8 +2,8 @@
 // SHA-384 and HMAC rows (tests/vectors/vec_cavp_sha384.mettle,
 // vec_cavp_hmac_sha384.mettle), and Wycheproof HMAC-SHA384 and HKDF-SHA384
 // (vec_wp_hmac_sha384.mettle, vec_wp_hkdf_sha384.mettle).
-import "crypto/crypto";
-import "crypto/hash/sha2";
+import "cryptex/cryptex";
+import "cryptex/hash/sha2";
 import "tcheck";
 import "vectors/vec_cavp_sha384";
 import "vectors/vec_cavp_hmac_sha384";

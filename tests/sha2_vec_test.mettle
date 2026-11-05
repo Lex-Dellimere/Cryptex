@@ -1,8 +1,8 @@
 // SHA-256 / SHA-512 against every row of tests/vectors/vec_hash.mettle (generated
 // from libsodium): the one-shot cr_ functions, and the incremental crx_ engine
 // fed in three uneven parts.
-import "crypto/crypto";
-import "crypto/hash/sha2";
+import "cryptex/cryptex";
+import "cryptex/hash/sha2";
 import "tcheck";
 import "vectors/vec_hash";
 

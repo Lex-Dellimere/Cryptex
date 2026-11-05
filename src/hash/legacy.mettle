@@ -8,10 +8,10 @@
 // cr_<hash>_init, _update (any number of times) and _final, on a
 // caller-owned CrMd5State or CrSha1State. _final always wipes the state.
 
-import "crypto/core/status";
-import "crypto/core/util";
-import "crypto/hash/md5";
-import "crypto/hash/sha1";
+import "cryptex/core/status";
+import "cryptex/core/util";
+import "cryptex/hash/md5";
+import "cryptex/hash/sha1";
 
 var g_cr_legacy_empty: uint8[1];
 

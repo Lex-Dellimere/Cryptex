@@ -1,7 +1,7 @@
 // hex and base64url (RFC 4648 section 10 vectors, URL alphabet, no padding):
 // known values, round trips over every length 0..64, strict rejection.
 import "std/conv";
-import "crypto/crypto";
+import "cryptex/cryptex";
 import "tcheck";
 
 fn b64_is(label: string, raw: string, want: string) {

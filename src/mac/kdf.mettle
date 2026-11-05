@@ -3,10 +3,10 @@
 // Mettle on top of the streaming HMAC in mac. Loop bounds depend only on
 // public lengths.
 
-import "crypto/core/status";
-import "crypto/core/types";
-import "crypto/core/util";
-import "crypto/mac/mac";
+import "cryptex/core/status";
+import "cryptex/core/types";
+import "cryptex/core/util";
+import "cryptex/mac/mac";
 
 /// Size of a pseudorandom key made by cr_hkdf_sha256_extract (the HMAC-SHA256
 /// output size).

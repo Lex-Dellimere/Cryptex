@@ -15,7 +15,7 @@
 //
 // Where BearSSL returns a uint32 truth value, the result is exactly 1 or 0.
 
-import "crypto/core/util";
+import "cryptex/core/util";
 
 const CRX_I31_MASK: uint32 = 0x7FFFFFFF;
 

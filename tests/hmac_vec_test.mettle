@@ -1,7 +1,7 @@
 // HMAC-SHA256 / HMAC-SHA512 against every row of tests/vectors/vec_mac.mettle
 // (generated from libsodium's init/update/final): one-shot, streaming in two
 // uneven parts, verify true, and verify false after flipping a tag bit.
-import "crypto/crypto";
+import "cryptex/cryptex";
 import "tcheck";
 import "vectors/vec_mac";
 

@@ -25,9 +25,9 @@
 // verification works on public data only and is variable time (the sliding
 // windows, the point decoding and the small-order tests).
 
-import "crypto/core/status";
-import "crypto/core/util";
-import "crypto/hash/sha2";
+import "cryptex/core/status";
+import "cryptex/core/util";
+import "cryptex/hash/sha2";
 
 // ---------------------------------------------------------------------------
 // Constants

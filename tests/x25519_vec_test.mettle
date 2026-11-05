@@ -1,7 +1,7 @@
 // X25519 against every libsodium-generated row of vec_x25519.mettle
 // (sk | pk | peer | shared): public_from_secret(sk) == pk and
 // shared(sk, peer) == shared.
-import "crypto/crypto";
+import "cryptex/cryptex";
 import "tcheck";
 import "vectors/vec_x25519";
 

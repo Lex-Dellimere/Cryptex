@@ -2686,7 +2686,7 @@ if (!cr_p384_ecdsa_verify(&sig[0], sl, m.chars, (int64)m.length, CR_HASH_SHA384,
 
 ## rsa/rsa
 
-RSA signatures in pure Mettle: RSASSA-PKCS1-v1_5 (RFC 8017 sections 8.2 and 9.2) and RSASSA-PSS (sections 8.1 and 9.1, with MGF1 from appendix B.2.1), signing and verifying, over the 31-bit big integers of crypto/ecc/i31.
+RSA signatures in pure Mettle: RSASSA-PKCS1-v1_5 (RFC 8017 sections 8.2 and 9.2) and RSASSA-PSS (sections 8.1 and 9.1, with MGF1 from appendix B.2.1), signing and verifying, over the 31-bit big integers of cryptex/ecc/i31.
 
 ### cr_rsa_verify_pkcs1
 

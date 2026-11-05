@@ -15,11 +15,11 @@
 // same output on both paths, in place too, and the hardware GHASH, CTR and
 // block functions are compared with the portable ones directly.
 import "std/mem";
-import "crypto/crypto";
-import "crypto/cipher/aes";
-import "crypto/cipher/ghash";
-import "crypto/cipher/aes_hw_x86_64" if x86_64;
-import "crypto/cipher/aes_hw_aarch64" if aarch64;
+import "cryptex/cryptex";
+import "cryptex/cipher/aes";
+import "cryptex/cipher/ghash";
+import "cryptex/cipher/aes_hw_x86_64" if x86_64;
+import "cryptex/cipher/aes_hw_aarch64" if aarch64;
 import "tcheck";
 import "vectors/vec_cavp_aes_gcm";
 import "vectors/vec_wp_aes_gcm";

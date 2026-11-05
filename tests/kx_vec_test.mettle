@@ -1,7 +1,7 @@
 // crypto_kx-style session keys against every libsodium-generated row of
 // vec_kx.mettle (client sk | client pk | server sk | server pk | client rx |
 // client tx | server rx | server tx).
-import "crypto/crypto";
+import "cryptex/cryptex";
 import "tcheck";
 import "vectors/vec_kx";
 

@@ -17,13 +17,13 @@
 //   cavp ecdsa: hash | msg | public key | sig (DER) | v-or-i   hash is 256, 384, 512
 //   wp ecdsa:   hash | public key | msg | sig (DER) | v-or-i   (key before message)
 // ecdsa verify is true exactly for "v".
-import "crypto/core/status";
-import "crypto/core/types";
-import "crypto/core/util";
-import "crypto/ecc/i31";
-import "crypto/ecc/p384";
-import "crypto/ecc/ecdsa";
-import "crypto/hash/hash";
+import "cryptex/core/status";
+import "cryptex/core/types";
+import "cryptex/core/util";
+import "cryptex/ecc/i31";
+import "cryptex/ecc/p384";
+import "cryptex/ecc/ecdsa";
+import "cryptex/hash/hash";
 import "std/time";
 import "tcheck";
 import "vectors/vec_cavp_keypair_384";

@@ -12,13 +12,13 @@
 // A message is limited to 2^36 - 32 bytes. Decryption fails closed: the tag
 // is checked before any plaintext is produced.
 
-import "crypto/core/status";
-import "crypto/core/types";
-import "crypto/core/util";
-import "crypto/cipher/aes";
-import "crypto/cipher/ghash";
-import "crypto/cipher/aes_hw_x86_64" if x86_64;
-import "crypto/cipher/aes_hw_aarch64" if aarch64;
+import "cryptex/core/status";
+import "cryptex/core/types";
+import "cryptex/core/util";
+import "cryptex/cipher/aes";
+import "cryptex/cipher/ghash";
+import "cryptex/cipher/aes_hw_x86_64" if x86_64;
+import "cryptex/cipher/aes_hw_aarch64" if aarch64;
 
 /// CrAesGcm: An AES-128-GCM or AES-256-GCM key, ready for cr_aes_gcm_*: the expanded AES round keys (bitsliced, and for AES-NI when the CPU has it) and the GHASH key. Initialize it once with cr_aes_gcm_init and use it for any number of messages.
 /// in: - (zeroed when declared: `var x: CrAesGcm;`; a zeroed context is not initialized and every use returns CR_E_ARG)

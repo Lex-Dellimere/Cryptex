@@ -10,10 +10,10 @@
 // multiplications). Branches depend on lengths, steps and the public
 // separators of pasted text only.
 
-import "crypto/core/status";
-import "crypto/core/types";
-import "crypto/core/util";
-import "crypto/hash/sha1";
+import "cryptex/core/status";
+import "cryptex/core/types";
+import "cryptex/core/util";
+import "cryptex/hash/sha1";
 
 /// CR_TOTP_SECRET_BYTES: the recommended size of an authenticator secret, in
 /// bytes (160 bits, the HMAC-SHA1 output size; RFC 4226 requires at least

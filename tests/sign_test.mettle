@@ -1,5 +1,5 @@
 // Ed25519: RFC 8032 section 7.1 TEST 1 (empty message) and TEST 2 (0x72).
-import "crypto/crypto";
+import "cryptex/cryptex";
 import "tcheck";
 
 fn ed_case(label: string, seed_hex: string, pk_hex: string, msg_hex: string, sig_hex: string) {

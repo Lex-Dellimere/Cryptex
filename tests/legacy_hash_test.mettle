@@ -5,7 +5,7 @@
 // (msg|sha1|key|hmac, fields 0 and 1). Every message is hashed in one shot and
 // fed in pieces of 1, 7, 64 and 1000 bytes; the state must be all zero after
 // _final; argument errors are checked at the end.
-import "crypto/crypto";
+import "cryptex/cryptex";
 import "tcheck";
 import "vectors/vec_md5";
 import "vectors/vec_sha1";

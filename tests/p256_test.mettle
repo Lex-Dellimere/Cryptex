@@ -14,9 +14,9 @@
 //                                        CR_E_KEY for "i"
 //   wp:      d | public | shared | v-or-i   "v": CR_OK and shared matches,
 //                                        "i": CR_E_KEY and shared wiped
-import "crypto/crypto";
-import "crypto/ecc/p256";
-import "crypto/ecc/i31";
+import "cryptex/cryptex";
+import "cryptex/ecc/p256";
+import "cryptex/ecc/i31";
 import "tcheck";
 import "vectors/vec_cavp_keypair_256";
 import "vectors/vec_cavp_ecdh_256";

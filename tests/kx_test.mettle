@@ -1,6 +1,6 @@
 // X25519: RFC 7748 section 5.2 vector 1 and the section 6.1 Alice/Bob
 // exchange; crypto_kx session keys mirror each other.
-import "crypto/crypto";
+import "cryptex/cryptex";
 import "tcheck";
 
 fn main() -> int32 {

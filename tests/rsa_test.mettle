@@ -10,8 +10,8 @@
 // Besides the rows: a derived 1024 bit key, a signature one byte short, bad
 // hash ids, leading zero bytes in the key, even keys, bad exponents, null
 // arguments, and the release time of one verification at 2048 and 4096 bits.
-import "crypto/rsa/rsa";
-import "crypto/hash/hash";
+import "cryptex/rsa/rsa";
+import "cryptex/hash/hash";
 import "tcheck";
 import "std/bench";
 import "vectors/vec_cavp_rsa_15";

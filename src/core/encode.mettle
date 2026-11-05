@@ -13,8 +13,8 @@
 // straight to C), which is why the capacity needs one extra byte; the
 // reported length excludes it.
 
-import "crypto/core/status";
-import "crypto/core/util";
+import "cryptex/core/status";
+import "cryptex/core/util";
 
 
 // Inputs above this are refused, so no size computation can overflow.

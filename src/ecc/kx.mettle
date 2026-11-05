@@ -5,11 +5,11 @@
 // For a protocol, prefer cr_kx_*: it never hands out the raw shared point.
 // cr_x25519_shared exists for protocols that specify their own KDF (Noise).
 
-import "crypto/core/status";
-import "crypto/core/types";
-import "crypto/core/util";
-import "crypto/hash/blake2b";
-import "crypto/ecc/curve25519";
+import "cryptex/core/status";
+import "cryptex/core/types";
+import "cryptex/core/util";
+import "cryptex/hash/blake2b";
+import "cryptex/ecc/curve25519";
 
 // True if the 32 bytes are all zero. The answer is public (it decides the
 // error), the scan itself touches every byte.

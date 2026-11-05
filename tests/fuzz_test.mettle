@@ -17,10 +17,10 @@
 import "std/mem";
 import "std/conv";
 import "std/io";
-import "crypto/crypto";
-import "crypto/password/argon2";
-import "crypto/core/sys_x86_64" if x86_64;
-import "crypto/core/sys_aarch64" if aarch64;
+import "cryptex/cryptex";
+import "cryptex/password/argon2";
+import "cryptex/core/sys_x86_64" if x86_64;
+import "cryptex/core/sys_aarch64" if aarch64;
 import "tcheck";
 import "vectors/vec_cavp_rsa_15";
 import "vectors/vec_cavp_rsa_pss";

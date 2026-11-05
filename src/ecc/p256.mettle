@@ -14,10 +14,10 @@
 // it is not a key, so run it through a KDF (cr_hkdf_sha256 or
 // cr_hkdf_sha384) before using it.
 
-import "crypto/core/status";
-import "crypto/core/types";
-import "crypto/core/util";
-import "crypto/ecc/i31";
+import "cryptex/core/status";
+import "cryptex/core/types";
+import "cryptex/core/util";
+import "cryptex/ecc/i31";
 
 /// Size in bytes of a P-256 public key: the uncompressed point 0x04 || X || Y.
 /// in: -

@@ -2,8 +2,8 @@
 // ChaCha20-Poly1305,
 // XChaCha20-Poly1305, HMAC-SHA1/256/512 and HKDF-SHA256. The last field of each
 // row is "v" (must succeed and match) or "i" (must be rejected).
-import "crypto/crypto";
-import "crypto/hash/sha1";
+import "cryptex/cryptex";
+import "cryptex/hash/sha1";
 import "tcheck";
 import "vectors/vec_wp_x25519";
 import "vectors/vec_wp_ed25519";

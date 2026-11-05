@@ -1,6 +1,6 @@
 // randombytes sanity (not a statistical test), constant-time compare, wipe,
 // status names.
-import "crypto/crypto";
+import "cryptex/cryptex";
 import "tcheck";
 
 fn main() -> int32 {

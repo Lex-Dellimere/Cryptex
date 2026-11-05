@@ -14,10 +14,10 @@
 // The SHA-512 round constants are stored as 32-bit halves (high, low) and
 // joined when used, because Mettle integer literals are 32-bit.
 
-import "crypto/core/status";
-import "crypto/core/util";
-import "crypto/hash/sha256_hw_x86_64" if x86_64;
-import "crypto/hash/sha256_hw_aarch64" if aarch64;
+import "cryptex/core/status";
+import "cryptex/core/util";
+import "cryptex/hash/sha256_hw_x86_64" if x86_64;
+import "cryptex/hash/sha256_hw_aarch64" if aarch64;
 
 var g_crx_k256: uint32[64] = [
   (uint32)0x428a2f98, (uint32)0x71374491, (uint32)0xb5c0fbcf, (uint32)0xe9b5dba5,

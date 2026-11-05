@@ -12,10 +12,10 @@
 // makes the fault check fire (CR_E_INTERNAL, output wiped), argument errors,
 // CR_E_SPACE, an unknown hash, and the release time of one signature at 2048
 // and 3072 bits.
-import "crypto/rsa/rsa";
-import "crypto/hash/hash";
-import "crypto/core/status";
-import "crypto/core/util";
+import "cryptex/rsa/rsa";
+import "cryptex/hash/hash";
+import "cryptex/core/status";
+import "cryptex/core/util";
 import "tcheck";
 import "std/bench";
 import "vectors/vec_rsa_sign";

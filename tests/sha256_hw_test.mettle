@@ -1,12 +1,12 @@
 // The SHA-NI SHA-256 path against the portable compression: 0 to 20 blocks
 // of patterned data from several chaining values, and data at odd offsets.
 // Skipped when the CPU has no SHA-NI.
-import "crypto/hash/sha2";
-import "crypto/core/util";
+import "cryptex/hash/sha2";
+import "cryptex/core/util";
 import "tcheck";
 
-import "crypto/hash/sha256_hw_x86_64" if x86_64;
-import "crypto/hash/sha256_hw_aarch64" if aarch64;
+import "cryptex/hash/sha256_hw_x86_64" if x86_64;
+import "cryptex/hash/sha256_hw_aarch64" if aarch64;
 
 var g_data: uint8[1400];
 var g_k: uint32[64] = [

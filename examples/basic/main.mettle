@@ -1,7 +1,7 @@
 // A project that uses Cryptex: encrypt a value and decrypt it again.
 //   cd examples/basic && mbuild run
 import "std/io";
-import "crypto/crypto";
+import "cryptex/cryptex";
 
 fn main() -> int32 {
   var k: CrKey32;

@@ -12,8 +12,8 @@
 // and expands it on every call, the expanded round keys
 // (crx_aes_skey_expand) are computed once and kept by the caller.
 
-import "crypto/core/util";
-import "crypto/cipher/chacha";
+import "cryptex/core/util";
+import "cryptex/cipher/chacha";
 
 // Round constants of the key schedule; indexed by a public counter.
 var g_crx_aes_rcon: uint32[10] = [

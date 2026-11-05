@@ -1,7 +1,7 @@
 // SHA-256 / SHA-512: FIPS 180-2 "abc", "" and the 448-bit message.
 // BLAKE2b-512: RFC 7693 Appendix A "abc". Keyed/short BLAKE2b values were
 // cross-checked with Python hashlib (OpenSSL), independent of libsodium.
-import "crypto/crypto";
+import "cryptex/cryptex";
 import "tcheck";
 
 fn main() -> int32 {

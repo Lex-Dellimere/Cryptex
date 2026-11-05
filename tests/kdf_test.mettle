@@ -1,8 +1,8 @@
 // HKDF-SHA256: RFC 5869 Appendix A test cases 1, 2 and 3, every row of
 // tests/vectors/vec_hkdf.mettle (extract, expand and one-shot), and argument errors.
-import "crypto/core/status";
-import "crypto/core/util";
-import "crypto/mac/kdf";
+import "cryptex/core/status";
+import "cryptex/core/util";
+import "cryptex/mac/kdf";
 import "tcheck";
 import "vectors/vec_hkdf";
 

@@ -8,11 +8,11 @@
 // failure no plaintext is released. Both families share one RFC 8439 2.8
 // seal and one open (cr_aead12_seal, cr_aead12_open).
 
-import "crypto/core/status";
-import "crypto/core/types";
-import "crypto/core/util";
-import "crypto/cipher/chacha";
-import "crypto/cipher/poly1305";
+import "cryptex/core/status";
+import "cryptex/core/types";
+import "cryptex/core/util";
+import "cryptex/cipher/chacha";
+import "cryptex/cipher/poly1305";
 
 /// Bytes the authentication tag adds to every ciphertext.
 /// in: -

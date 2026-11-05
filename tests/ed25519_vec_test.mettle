@@ -2,7 +2,7 @@
 // (seed | pk | msg | sig): the seed gives pk, signing gives sig, verifying
 // accepts it, and one flipped bit in the message, signature or public key,
 // or a non-canonical S (S + L), is rejected.
-import "crypto/crypto";
+import "cryptex/cryptex";
 import "tcheck";
 import "vectors/vec_ed25519";
 

@@ -1,7 +1,7 @@
 // XChaCha20-Poly1305-IETF: draft-irtf-cfrg-xchacha-03 Appendix A.3.1, plus
 // fail-closed decryption (tampering, wrong ad/nonce/key, truncation,
 // capacity) and in-place round trips.
-import "crypto/crypto";
+import "cryptex/cryptex";
 import "tcheck";
 
 fn main() -> int32 {

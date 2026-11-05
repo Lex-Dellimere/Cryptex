@@ -4,8 +4,8 @@
 //   cd examples/bench && mbuild run -r
 import "std/io";
 import "std/time";
-import "crypto/crypto";
-import "crypto/cipher/gcm";
+import "cryptex/cryptex";
+import "cryptex/cipher/gcm";
 
 const BIG: int64 = 16384;
 const MIN_NS: int64 = 300000000;

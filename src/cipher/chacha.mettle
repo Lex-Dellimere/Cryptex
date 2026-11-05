@@ -7,9 +7,9 @@
 // Long inputs go through the SIMD code in chacha_hw_x86_64.mettle when the
 // CPU has SSSE3 or AVX2; the output is the same byte for byte.
 
-import "crypto/core/util";
-import "crypto/cipher/chacha_hw_x86_64" if x86_64;
-import "crypto/cipher/chacha_hw_aarch64" if aarch64;
+import "cryptex/core/util";
+import "cryptex/cipher/chacha_hw_x86_64" if x86_64;
+import "cryptex/cipher/chacha_hw_aarch64" if aarch64;
 
 var g_crx_chacha_lvl: uint32 = 0;
 

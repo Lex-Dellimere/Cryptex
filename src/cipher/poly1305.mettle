@@ -8,10 +8,10 @@
 // the message bytes; only on public lengths. The final reduction picks h or
 // h - p with a mask.
 
-import "crypto/core/util";
-import "crypto/cipher/chacha";
-import "crypto/cipher/poly1305_x86_64" if x86_64;
-import "crypto/cipher/poly1305_aarch64" if aarch64;
+import "cryptex/core/util";
+import "cryptex/cipher/chacha";
+import "cryptex/cipher/poly1305_x86_64" if x86_64;
+import "cryptex/cipher/poly1305_aarch64" if aarch64;
 
 /// internal: Poly1305 state (clamped r, accumulator h in 26-bit limbs, the
 /// same in base 2^64 for x86-64 as h0, h1, h2, r0, r1, the s pad, and a

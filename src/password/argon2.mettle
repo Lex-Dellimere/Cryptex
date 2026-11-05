@@ -11,11 +11,11 @@
 // The password only reaches the matrix through BLAKE2b and the BlaMka
 // compression, which are branch-free and table-free.
 
-import "crypto/core/sys_x86_64" if x86_64;
-import "crypto/core/sys_aarch64" if aarch64;
-import "crypto/core/status";
-import "crypto/core/util";
-import "crypto/hash/blake2b";
+import "cryptex/core/sys_x86_64" if x86_64;
+import "cryptex/core/sys_aarch64" if aarch64;
+import "cryptex/core/status";
+import "cryptex/core/util";
+import "cryptex/hash/blake2b";
 
 // Smallest tag RFC 9106 allows, and the smallest salt.
 const CRX_A2_TAG_MIN: int64 = 4;

@@ -3,12 +3,12 @@
 // place and out of place. Then crx_chacha20_xor for every length up to 1100
 // against a byte-by-byte scalar build of the same stream. Paths the CPU
 // lacks are skipped.
-import "crypto/cipher/chacha";
-import "crypto/core/util";
+import "cryptex/cipher/chacha";
+import "cryptex/core/util";
 import "tcheck";
 
-import "crypto/cipher/chacha_hw_x86_64" if x86_64;
-import "crypto/cipher/chacha_hw_aarch64" if aarch64;
+import "cryptex/cipher/chacha_hw_x86_64" if x86_64;
+import "cryptex/cipher/chacha_hw_aarch64" if aarch64;
 
 var g_src: uint8[2700];
 var g_dst: uint8[2700];

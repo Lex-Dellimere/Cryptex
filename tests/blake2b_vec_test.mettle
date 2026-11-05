@@ -3,8 +3,8 @@
 // BLAKE2b-512), through cr_blake2b and through the streaming crx_ core
 // fed in three uneven parts.
 import "std/mem";
-import "crypto/crypto";
-import "crypto/hash/blake2b";
+import "cryptex/cryptex";
+import "cryptex/hash/blake2b";
 import "tcheck";
 import "vectors/vec_blake2b";
 import "vectors/vec_hash";

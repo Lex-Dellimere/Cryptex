@@ -6,7 +6,7 @@
 // Ported from BearSSL (ghash_ctmul64.c), Copyright (c) 2016 Thomas Pornin,
 // MIT license; see NOTICE.
 
-import "crypto/core/util";
+import "cryptex/core/util";
 
 // A 128-bit block is held as two 64-bit words. The carry-less product of two
 // words is computed with integer multiplications on operands masked to every

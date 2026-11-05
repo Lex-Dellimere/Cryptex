@@ -2,7 +2,7 @@
 // (key | nonce | ad | msg | ct||tag): encrypt matches, decrypt round-trips,
 // and a flipped bit in the ciphertext or the tag gives CR_E_VERIFY with the
 // output wiped.
-import "crypto/crypto";
+import "cryptex/cryptex";
 import "tcheck";
 import "vectors/vec_aead";
 

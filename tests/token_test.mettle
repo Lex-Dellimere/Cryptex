@@ -1,10 +1,10 @@
 // token: format, alphabet membership, distribution, check, errors, bits, hash;
 // codes: generation, normalization, pepper hashing.
 import "std/conv";
-import "crypto/core/status";
-import "crypto/core/types";
-import "crypto/core/util";
-import "crypto/recipes/token";
+import "cryptex/core/status";
+import "cryptex/core/types";
+import "cryptex/core/util";
+import "cryptex/recipes/token";
 import "tcheck";
 
 var A62: string = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";

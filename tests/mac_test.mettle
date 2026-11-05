@@ -1,6 +1,6 @@
 // HMAC-SHA256 / HMAC-SHA512: RFC 4231 test cases 1, 2, 3, 4, 6, 7 (keys of
 // 20, 4, 20, 25, 131 and 131 bytes), one-shot and streaming, plus verify.
-import "crypto/crypto";
+import "cryptex/cryptex";
 import "tcheck";
 
 struct TcMac {

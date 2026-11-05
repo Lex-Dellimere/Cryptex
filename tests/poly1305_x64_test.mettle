@@ -2,8 +2,8 @@
 // keys and messages of every length to 300, split updates, and the
 // worst cases for carries (all-0xff keys and messages, h close to p), and
 // the RFC 8439 Appendix A.3 edge vectors (#5 to #11) on both.
-import "crypto/cipher/poly1305";
-import "crypto/core/util";
+import "cryptex/cipher/poly1305";
+import "cryptex/core/util";
 import "tcheck";
 
 var g_msg: uint8[320];

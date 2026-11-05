@@ -20,16 +20,16 @@ In your `mbuild.mettle`:
 
 ```mettle
 fn deps() {
-  mb_dep_path("crypto", "../cryptex");
+  mb_dep_path("cryptex", "../cryptex");
 }
 ```
 
-Then `import "crypto/crypto";`. Nothing to link: a program that uses Cryptex stays a static binary.
+Then `import "cryptex/cryptex";`. Nothing to link: a program that uses Cryptex stays a static binary.
 
 ## Example
 
 ```mettle
-import "crypto/crypto";
+import "cryptex/cryptex";
 
 fn main() -> int32 {
   // Encrypt a value. The nonce is inside the output.
@@ -84,7 +84,7 @@ fn main() -> int32 {
 ## Layout
 
 ```
-src/crypto.mettle   the facade: import "crypto/crypto" gives you everything
+src/cryptex.mettle  the facade: import "cryptex/cryptex" gives you everything
 src/core/           status codes, types, random, compare, wipe, hex/base64url
 src/hash/           SHA-256, SHA-512, BLAKE2b (SHA-1 is internal, for TOTP)
 src/mac/            HMAC, HKDF

@@ -2,11 +2,11 @@
 // tests/vectors/vec_sha1.mettle; HOTP (RFC 4226 Appendix D), TOTP (RFC 6238
 // Appendix B), verification with a window, base32 (RFC 4648 section 10) and
 // the otpauth:// URI.
-import "crypto/core/status";
-import "crypto/core/types";
-import "crypto/core/util";
-import "crypto/hash/sha1";
-import "crypto/recipes/totp";
+import "cryptex/core/status";
+import "cryptex/core/types";
+import "cryptex/core/util";
+import "cryptex/hash/sha1";
+import "cryptex/recipes/totp";
 import "std/mem";
 import "tcheck";
 import "vectors/vec_sha1";

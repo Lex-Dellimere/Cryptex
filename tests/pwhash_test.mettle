@@ -1,7 +1,7 @@
 // Argon2id: hash, verify, wrong password, needs_rehash, text round trip,
 // malformed input.
 import "std/mem";
-import "crypto/crypto";
+import "cryptex/cryptex";
 import "tcheck";
 
 fn main() -> int32 {

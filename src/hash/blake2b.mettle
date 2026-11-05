@@ -2,8 +2,8 @@
 // (hash.mettle) and, later, Argon2id. Output length 1..64, key 0..64 bytes.
 // Callers validate arguments. Not part of the public API.
 
-import "crypto/core/status";
-import "crypto/core/util";
+import "cryptex/core/status";
+import "cryptex/core/util";
 
 /// internal: BLAKE2b streaming state. Treat as opaque; init, update, final.
 export struct CrxBlake2b {

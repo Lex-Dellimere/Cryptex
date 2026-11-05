@@ -3,7 +3,7 @@
 // vec_chachapoly.mettle (key | nonce | ad | msg | ct||tag), tamper
 // detection (tag, ciphertext, ad, nonce) with wiped output, in-place use,
 // and the argument checks.
-import "crypto/crypto";
+import "cryptex/cryptex";
 import "tcheck";
 import "vectors/vec_chachapoly";
 

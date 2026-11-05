@@ -8,8 +8,8 @@
 //
 // The 64 constants are T[i] = floor(2^32 * abs(sin(i + 1))) from the RFC.
 
-import "crypto/core/status";
-import "crypto/core/util";
+import "cryptex/core/status";
+import "cryptex/core/util";
 
 var g_crx_md5_t: uint32[64] = [
   (uint32)0xd76aa478, (uint32)0xe8c7b756, (uint32)0x242070db, (uint32)0xc1bdceee,

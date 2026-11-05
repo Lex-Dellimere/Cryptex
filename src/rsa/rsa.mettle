@@ -1,7 +1,7 @@
 // RSA signatures in pure Mettle: RSASSA-PKCS1-v1_5 (RFC 8017 sections 8.2
 // and 9.2) and RSASSA-PSS (sections 8.1 and 9.1, with MGF1 from appendix
 // B.2.1), signing and verifying, over the 31-bit big integers of
-// crypto/ecc/i31.
+// cryptex/ecc/i31.
 //
 // Ported from BearSSL (rsa_i31_pub.c, rsa_pkcs1_sig_unpad.c,
 // rsa_pss_sig_unpad.c, mgf1.c for verification; rsa_i31_priv.c,
@@ -28,10 +28,10 @@
 // damaged key) the output is wiped and CR_E_INTERNAL is returned, so a faulty
 // signature, which would reveal a factor of the modulus, never leaves.
 
-import "crypto/core/status";
-import "crypto/core/util";
-import "crypto/hash/hash";
-import "crypto/ecc/i31";
+import "cryptex/core/status";
+import "cryptex/core/util";
+import "cryptex/hash/hash";
+import "cryptex/ecc/i31";
 
 const CRX_RSA_MIN_BITS: int64 = 2048;
 const CRX_RSA_MAX_BITS: int64 = 4096;
