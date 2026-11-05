@@ -129,7 +129,7 @@ same machine. Run `cd examples/bench && mbuild run -r` to measure yours.
 | AES-128-GCM, 16 KiB (AES-NI) | 3.6 GB/s | 11.0 GB/s |
 | AES-256-GCM, 16 KiB (AES-NI) | 3.2 GB/s | 9.8 GB/s |
 | AES-128-GCM, portable constant-time code | 93 MB/s | - |
-| ChaCha20-Poly1305, 16 KiB | 1.3 GB/s | 3.9 GB/s |
+| ChaCha20-Poly1305, 16 KiB | 1.6 GB/s | 3.9 GB/s |
 | SHA-256, 16 KiB (SHA-NI) | 1.6 GB/s | 1.95 GB/s |
 | SHA-512, 16 KiB | 210 MB/s | 0.91 GB/s |
 | X25519 | 103 us | 35 us |

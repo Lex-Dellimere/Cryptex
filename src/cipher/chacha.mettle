@@ -124,9 +124,15 @@ export fn crx_chacha20_xor(out: uint8*, inp: uint8*, n: int64, key: uint8*, nonc
       st[15] = crx_ld32(&nonce12[8]);
       var nb: int64 = n >> 6;
       if (lvl == 2) {
+        var n8: int64 = nb & ~(int64)7;
+        crx_chacha_avx2x8_blocks(&st[0], inp, out, n8);
+        pos = n8 << 6;
+        ctr = ctr + (uint32)n8;
+        nb = nb - n8;
+        st[12] = ctr;
         var n4: int64 = nb & ~(int64)3;
-        crx_chacha_avx2_blocks(&st[0], inp, out, n4);
-        pos = n4 << 6;
+        crx_chacha_avx2_blocks(&st[0], &inp[pos], &out[pos], n4);
+        pos = pos + (n4 << 6);
         ctr = ctr + (uint32)n4;
         nb = nb - n4;
       }

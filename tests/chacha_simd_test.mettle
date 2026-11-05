@@ -1,4 +1,4 @@
-// The SIMD ChaCha20 paths (SSSE3 and AVX2) against the scalar block
+// The SIMD ChaCha20 paths (SSSE3, AVX2 four and eight blocks) against the scalar block
 // function: every block count up to 40, counters that wrap past 2^32, in
 // place and out of place. Then crx_chacha20_xor for every length up to 1100
 // against a byte-by-byte scalar build of the same stream. Paths the CPU
@@ -55,6 +55,7 @@ fn check_path(name: string, lvl: int32, key: uint8*, nonce: uint8*) {
   var bad: int32 = 0;
   var step: int64 = 2;
   if (lvl == 2) { step = 4; }
+  if (lvl == 3) { step = 8; }
   var ci: int32 = 0;
   while (ci < 3) {
     var nb: int64 = 0;
@@ -64,6 +65,7 @@ fn check_path(name: string, lvl: int32, key: uint8*, nonce: uint8*) {
       fill_state(&st[0], key, nonce, ctrs[ci]);
       tc_fill(&g_dst[0], n + 64, 0xaa);
       if (lvl == 2) { crx_chacha_avx2_blocks(&st[0], &g_src[0], &g_dst[0], nb); }
+      if (lvl == 3) { crx_chacha_avx2x8_blocks(&st[0], &g_src[0], &g_dst[0], nb); }
       if (lvl == 1) { crx_chacha_ssse3_blocks(&st[0], &g_src[0], &g_dst[0], nb); }
       if (!cr_equal(&g_dst[0], &g_ref[0], n)) { bad = bad + 1; }
       if (g_dst[n] != (uint8)0xaa) { bad = bad + 1; }
@@ -74,6 +76,7 @@ fn check_path(name: string, lvl: int32, key: uint8*, nonce: uint8*) {
         i = i + 1;
       }
       if (lvl == 2) { crx_chacha_avx2_blocks(&st[0], &g_dst[0], &g_dst[0], nb); }
+      if (lvl == 3) { crx_chacha_avx2x8_blocks(&st[0], &g_dst[0], &g_dst[0], nb); }
       if (lvl == 1) { crx_chacha_ssse3_blocks(&st[0], &g_dst[0], &g_dst[0], nb); }
       if (!cr_equal(&g_dst[0], &g_ref[0], n)) { bad = bad + 1; }
       nb = nb + step;
@@ -105,6 +108,7 @@ fn main() -> int32 {
   var lvl: uint32 = crx_chacha_hw_level();
   if (lvl >= (uint32)1) { check_path("ssse3 blocks match scalar", 1, &key[0], &nonce[0]); }
   if (lvl >= (uint32)2) { check_path("avx2 blocks match scalar", 2, &key[0], &nonce[0]); }
+  if (lvl >= (uint32)2) { check_path("avx2 eight-block path matches scalar", 3, &key[0], &nonce[0]); }
 
   var bad: int32 = 0;
   var n: int64 = 0;
