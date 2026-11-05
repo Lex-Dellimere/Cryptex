@@ -1,5 +1,8 @@
 // Poly1305 (RFC 8439 section 2.5) in pure Mettle, 32-bit "donna" layout:
-// five 26-bit limbs, uint64 products. Internal: used by cr_aead_*.
+// five 26-bit limbs, uint64 products. On x86-64 the blocks and the final
+// step go through poly1305_x86_64.mettle instead (base 2^64 with mul and
+// adc, about twice as fast); the tag is the same. Internal: used by
+// cr_aead_*.
 //
 // Constant time: no branch, index or loop bound depends on r, h, the key or
 // the message bytes; only on public lengths. The final reduction picks h or
@@ -7,15 +10,20 @@
 
 import "crypto/core/util";
 import "crypto/cipher/chacha";
+import "crypto/cipher/poly1305_x86_64" if x86_64;
+import "crypto/cipher/poly1305_aarch64" if aarch64;
 
 /// internal: Poly1305 state (clamped r, accumulator h in 26-bit limbs, the
-/// s pad, and a 16-byte partial-block buffer).
+/// same in base 2^64 for x86-64 as h0, h1, h2, r0, r1, the s pad, and a
+/// 16-byte partial-block buffer).
 export struct CrxPoly1305 {
+  x: uint64[5];
   r: uint32[5];
   h: uint32[5];
   pad: uint32[4];
   buf: uint8[16];
   buflen: int64;
+  generic: uint32;
 }
 
 /// internal: starts a MAC with a 32-byte one-time key (r clamped per RFC
@@ -31,6 +39,12 @@ export fn crx_poly1305_init(s: CrxPoly1305*, key: uint8*) {
     s->h[i] = 0;
     i = i + 1;
   }
+  s->generic = 0;
+  s->x[0] = 0;
+  s->x[1] = 0;
+  s->x[2] = 0;
+  s->x[3] = (uint64)(crx_ld32(&key[0]) & (uint32)0x0fffffff) | ((uint64)(crx_ld32(&key[4]) & (uint32)0x0ffffffc) << 32);
+  s->x[4] = (uint64)(crx_ld32(&key[8]) & (uint32)0x0ffffffc) | ((uint64)(crx_ld32(&key[12]) & (uint32)0x0ffffffc) << 32);
   i = 0;
   while (i < 4) {
     s->pad[i] = crx_ld32(&key[16 + i * 4]);
@@ -47,6 +61,10 @@ export fn crx_poly1305_init(s: CrxPoly1305*, key: uint8*) {
 // Absorbs whole 16-byte blocks. hibit is 1 << 24 for a full block and 0 for
 // the final padded block (whose 0x01 byte is already in the data).
 fn crx_poly1305_blocks(s: CrxPoly1305*, m: uint8*, n: int64, hibit: uint32) {
+  if (crx_poly1305_x64() != (uint32)0 && s->generic == (uint32)0) {
+    crx_poly1305_x64_blocks(&s->x[0], m, n >> 4, (uint64)(hibit >> 24));
+    return;
+  }
   var m26: uint64 = (uint64)0x3ffffff;
   var r0: uint64 = (uint64)s->r[0];
   var r1: uint64 = (uint64)s->r[1];
@@ -94,6 +112,13 @@ fn crx_poly1305_blocks(s: CrxPoly1305*, m: uint8*, n: int64, hibit: uint32) {
   s->h[4] = (uint32)h4;
 }
 
+/// internal: makes s use the portable 26-bit limb code even where the
+/// base 2^64 core exists (the tests compare the two). Call right after
+/// crx_poly1305_init.
+export fn crx_poly1305_use_generic(s: CrxPoly1305*) {
+  s->generic = 1;
+}
+
 /// internal: absorbs n message bytes.
 export fn crx_poly1305_update(s: CrxPoly1305*, p: uint8*, n: int64) {
   var pos: int64 = 0;
@@ -129,6 +154,15 @@ export fn crx_poly1305_final(s: CrxPoly1305*, tag: uint8*) {
       i = i + 1;
     }
     crx_poly1305_blocks(s, &s->buf[0], 16, 0);
+  }
+  if (crx_poly1305_x64() != (uint32)0 && s->generic == (uint32)0) {
+    crx_poly1305_x64_emit(&s->x[0], (uint8*)&s->pad[0], tag);
+    cr_wipe((uint8*)&s->x[0], 40);
+    cr_wipe((uint8*)&s->r[0], 20);
+    cr_wipe((uint8*)&s->pad[0], 16);
+    cr_wipe(&s->buf[0], 16);
+    s->buflen = 0;
+    return;
   }
   var m26: uint32 = (uint32)0x3ffffff;
   var h0: uint32 = s->h[0];
@@ -170,6 +204,7 @@ export fn crx_poly1305_final(s: CrxPoly1305*, tag: uint8*) {
   f = (uint64)w3 + (uint64)s->pad[3] + (f >> 32);
   crx_st32(&tag[12], (uint32)f);
   // Wipe the state.
+  cr_wipe((uint8*)&s->x[0], 40);
   cr_wipe((uint8*)&s->r[0], 20);
   cr_wipe((uint8*)&s->h[0], 20);
   cr_wipe((uint8*)&s->pad[0], 16);

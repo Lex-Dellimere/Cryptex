@@ -1,0 +1,102 @@
+// The base 2^64 Poly1305 core against the portable 26-bit limb code: random
+// keys and messages of every length to 300, split updates, and the
+// worst cases for carries (all-0xff keys and messages, h close to p), and
+// the RFC 8439 Appendix A.3 edge vectors (#5 to #11) on both.
+import "crypto/cipher/poly1305";
+import "crypto/core/util";
+import "tcheck";
+
+var g_msg: uint8[320];
+var g_rng: uint32 = (uint32)0x2545f491;
+
+fn rnd() -> uint8 {
+  g_rng = g_rng ^ (g_rng << 13);
+  g_rng = g_rng ^ (g_rng >> 17);
+  g_rng = g_rng ^ (g_rng << 5);
+  return (uint8)(g_rng & (uint32)255);
+}
+
+fn mac(key: uint8*, m: uint8*, n: int64, split: int64, generic: bool, tag: uint8*) {
+  var s: CrxPoly1305;
+  crx_poly1305_init(&s, key);
+  if (generic) { crx_poly1305_use_generic(&s); }
+  crx_poly1305_update(&s, m, split);
+  crx_poly1305_update(&s, &m[split], n - split);
+  crx_poly1305_final(&s, tag);
+}
+
+fn same(key: uint8*, m: uint8*, n: int64, split: int64) -> bool {
+  var a: uint8[16];
+  var b: uint8[16];
+  mac(key, m, n, split, false, &a[0]);
+  mac(key, m, n, split, true, &b[0]);
+  return cr_equal(&a[0], &b[0], 16);
+}
+
+fn edge(name: string, k: string, m: string, t: string) {
+  var key: uint8[32];
+  var msg: uint8[64];
+  var tag: uint8[16];
+  tc_unhex(k, &key[0], 32);
+  var n: int64 = tc_unhex(m, &msg[0], 64);
+  mac(&key[0], &msg[0], n, 0, false, &tag[0]);
+  tc_hex_eq(name, &tag[0], 16, t);
+  mac(&key[0], &msg[0], n, 0, true, &tag[0]);
+  tc_hex_eq(name, &tag[0], 16, t);
+}
+
+fn main() -> int32 {
+  var z: string = "00000000000000000000000000000000";
+  var f: string = "ffffffffffffffffffffffffffffffff";
+  var r1: string = "01000000000000000000000000000000";
+  var r2: string = "02000000000000000000000000000000";
+  var r4: string = "01000000000000000400000000000000";
+  var t3: string = "03000000000000000000000000000000";
+  edge("A.3 #5", r2 + z, f, t3);
+  edge("A.3 #6", r2 + f, r2, t3);
+  edge("A.3 #7", r1 + z, f + "f0ffffffffffffffffffffffffffffff" + "11000000000000000000000000000000", "05000000000000000000000000000000");
+  edge("A.3 #8", r1 + z, f + "fbfefefefefefefefefefefefefefefe" + "01010101010101010101010101010101", z);
+  edge("A.3 #9", r2 + z, "fdffffffffffffffffffffffffffffff", "faffffffffffffffffffffffffffffff");
+  edge("A.3 #10", r4 + z, "e33594d7505e43b90000000000000000" + "3394d7505e4379cd0100000000000000" + z + r1, "14000000000000005500000000000000");
+  edge("A.3 #11", r4 + z, "e33594d7505e43b90000000000000000" + "3394d7505e4379cd0100000000000000" + z, "13000000000000000000000000000000");
+
+  var key: uint8[32];
+  var bad: int32 = 0;
+  var n: int64 = 0;
+  while (n <= 300) {
+    var i: int32 = 0;
+    while (i < 32) { key[i] = rnd(); i = i + 1; }
+    var j: int64 = 0;
+    while (j < n) { g_msg[j] = rnd(); j = j + 1; }
+    if (!same(&key[0], &g_msg[0], n, 0)) { bad = bad + 1; }
+    if (!same(&key[0], &g_msg[0], n, n / 3)) { bad = bad + 1; }
+    n = n + 1;
+  }
+  tc_ok("random keys and messages, every length to 300", bad == 0);
+
+  bad = 0;
+  var k: int32 = 0;
+  while (k < 4) {
+    var i: int32 = 0;
+    while (i < 32) {
+      key[i] = (uint8)255;
+      if (k == 1 && i >= 16) { key[i] = 0; }
+      if (k == 2 && i < 16) { key[i] = rnd(); }
+      if (k == 3 && i >= 16) { key[i] = (uint8)254; }
+      i = i + 1;
+    }
+    n = 0;
+    while (n <= 300) {
+      var j: int64 = 0;
+      while (j < n) { g_msg[j] = (uint8)255; j = j + 1; }
+      if (!same(&key[0], &g_msg[0], n, 0)) { bad = bad + 1; }
+      j = 0;
+      while (j < n) { g_msg[j] = 0; j = j + 1; }
+      if (!same(&key[0], &g_msg[0], n, 0)) { bad = bad + 1; }
+      n = n + 1;
+    }
+    k = k + 1;
+  }
+  tc_ok("all-0xff and all-zero keys and messages", bad == 0);
+  return tc_finish("poly1305_x64");
+}
