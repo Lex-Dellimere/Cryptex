@@ -1,0 +1,121 @@
+// The SIMD ChaCha20 paths (SSSE3 and AVX2) against the scalar block
+// function: every block count up to 40, counters that wrap past 2^32, in
+// place and out of place. Then crx_chacha20_xor for every length up to 1100
+// against a byte-by-byte scalar build of the same stream. Paths the CPU
+// lacks are skipped.
+import "crypto/cipher/chacha";
+import "crypto/core/util";
+import "tcheck";
+
+import "crypto/cipher/chacha_hw_x86_64" if x86_64;
+import "crypto/cipher/chacha_hw_aarch64" if aarch64;
+
+var g_src: uint8[2700];
+var g_dst: uint8[2700];
+var g_ref: uint8[2700];
+
+fn ref_stream(key: uint8*, nonce: uint8*, ctr: uint32, src: uint8*, out: uint8*, n: int64) {
+  var ks: uint8[64];
+  var c: uint32 = ctr;
+  var pos: int64 = 0;
+  while (pos < n) {
+    crx_chacha20_block(key, c, nonce, &ks[0]);
+    var i: int64 = 0;
+    while (i < 64 && pos + i < n) {
+      out[pos + i] = src[pos + i] ^ ks[i];
+      i = i + 1;
+    }
+    pos = pos + 64;
+    c = c + (uint32)1;
+  }
+}
+
+fn fill_state(st: uint32*, key: uint8*, nonce: uint8*, ctr: uint32) {
+  st[0] = (uint32)0x61707865;
+  st[1] = (uint32)0x3320646e;
+  st[2] = (uint32)0x79622d32;
+  st[3] = (uint32)0x6b206574;
+  var i: int32 = 0;
+  while (i < 8) {
+    st[4 + i] = crx_ld32(&key[i * 4]);
+    i = i + 1;
+  }
+  st[12] = ctr;
+  st[13] = crx_ld32(&nonce[0]);
+  st[14] = crx_ld32(&nonce[4]);
+  st[15] = crx_ld32(&nonce[8]);
+}
+
+fn check_path(name: string, lvl: int32, key: uint8*, nonce: uint8*) {
+  var st: uint32[16];
+  var ctrs: uint32[3];
+  ctrs[0] = 0;
+  ctrs[1] = (uint32)0xfffffff9;
+  ctrs[2] = (uint32)0x12345678;
+  var bad: int32 = 0;
+  var step: int64 = 2;
+  if (lvl == 2) { step = 4; }
+  var ci: int32 = 0;
+  while (ci < 3) {
+    var nb: int64 = 0;
+    while (nb <= 40) {
+      var n: int64 = nb * 64;
+      ref_stream(key, nonce, ctrs[ci], &g_src[0], &g_ref[0], n);
+      fill_state(&st[0], key, nonce, ctrs[ci]);
+      tc_fill(&g_dst[0], n + 64, 0xaa);
+      if (lvl == 2) { crx_chacha_avx2_blocks(&st[0], &g_src[0], &g_dst[0], nb); }
+      if (lvl == 1) { crx_chacha_ssse3_blocks(&st[0], &g_src[0], &g_dst[0], nb); }
+      if (!cr_equal(&g_dst[0], &g_ref[0], n)) { bad = bad + 1; }
+      if (g_dst[n] != (uint8)0xaa) { bad = bad + 1; }
+      if (st[12] != ctrs[ci]) { bad = bad + 1; }
+      var i: int64 = 0;
+      while (i < n) {
+        g_dst[i] = g_src[i];
+        i = i + 1;
+      }
+      if (lvl == 2) { crx_chacha_avx2_blocks(&st[0], &g_dst[0], &g_dst[0], nb); }
+      if (lvl == 1) { crx_chacha_ssse3_blocks(&st[0], &g_dst[0], &g_dst[0], nb); }
+      if (!cr_equal(&g_dst[0], &g_ref[0], n)) { bad = bad + 1; }
+      nb = nb + step;
+    }
+    ci = ci + 1;
+  }
+  tc_ok(name, bad == 0);
+}
+
+fn main() -> int32 {
+  var key: uint8[32];
+  var nonce: uint8[12];
+  var i: int32 = 0;
+  while (i < 32) {
+    key[i] = (uint8)(i * 7 + 3);
+    i = i + 1;
+  }
+  i = 0;
+  while (i < 12) {
+    nonce[i] = (uint8)(0xf0 - i);
+    i = i + 1;
+  }
+  var j: int32 = 0;
+  while (j < 2600) {
+    g_src[j] = (uint8)((j * 31 + 11) & 255);
+    j = j + 1;
+  }
+
+  var lvl: uint32 = crx_chacha_hw_level();
+  if (lvl >= (uint32)1) { check_path("ssse3 blocks match scalar", 1, &key[0], &nonce[0]); }
+  if (lvl >= (uint32)2) { check_path("avx2 blocks match scalar", 2, &key[0], &nonce[0]); }
+
+  var bad: int32 = 0;
+  var n: int64 = 0;
+  while (n <= 1100) {
+    ref_stream(&key[0], &nonce[0], (uint32)0xfffffff0, &g_src[0], &g_ref[0], n);
+    tc_fill(&g_dst[0], n + 1, 0x55);
+    crx_chacha20_xor(&g_dst[0], &g_src[0], n, &key[0], &nonce[0], (uint32)0xfffffff0);
+    if (!cr_equal(&g_dst[0], &g_ref[0], n)) { bad = bad + 1; }
+    if (g_dst[n] != (uint8)0x55) { bad = bad + 1; }
+    n = n + 1;
+  }
+  tc_ok("crx_chacha20_xor every length to 1100", bad == 0);
+  return tc_finish("chacha_simd");
+}

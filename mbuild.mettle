@@ -8,7 +8,7 @@ import "mbuild/api";
 // `mbuild test` and `mbuild test -r`. examples/basic is a small project that
 // uses crypto the way a dependent does.
 fn project() {
-  mb_package("crypto", "0.2.1");
+  mb_package("crypto", "0.2.2");
   mb_meta("description", "misuse-resistant crypto in pure Mettle: SHA-2, BLAKE2b, HMAC, Argon2id, XChaCha20-Poly1305, X25519, Ed25519, TOTP, hex/base64url, signed values, tokens, seal/open");
   mb_meta("license", "Apache-2.0");
   mb_import_root("src");

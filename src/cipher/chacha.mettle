@@ -2,10 +2,25 @@
 // (draft-irtf-cfrg-xchacha-03 section 2.2), in pure Mettle. Internal: the
 // public entry point is cr_aead_* in aead.mettle.
 //
-// Constant time: the only branches and loop bounds depend on public lengths
-// and the public block counter; the state words are secret.
+// Constant time: the only branches and loop bounds depend on public lengths,
+// the public block counter and the CPU type; the state words are secret.
+// Long inputs go through the SIMD code in chacha_hw_x86_64.mettle when the
+// CPU has SSSE3 or AVX2; the output is the same byte for byte.
 
 import "crypto/core/util";
+import "crypto/cipher/chacha_hw_x86_64" if x86_64;
+import "crypto/cipher/chacha_hw_aarch64" if aarch64;
+
+var g_crx_chacha_lvl: uint32 = 0;
+
+fn crx_chacha_level() -> uint32 {
+  var l: uint32 = g_crx_chacha_lvl;
+  if (l == 0) {
+    l = crx_chacha_hw_level() + (uint32)1;
+    g_crx_chacha_lvl = l;
+  }
+  return l - (uint32)1;
+}
 
 /// internal: loads 4 bytes as a little-endian uint32.
 export fn crx_ld32(p: uint8*) -> uint32 {
@@ -90,6 +105,39 @@ export fn crx_chacha20_xor(out: uint8*, inp: uint8*, n: int64, key: uint8*, nonc
   var ks: uint8[64];
   var ctr: uint32 = counter;
   var pos: int64 = 0;
+  if (n >= 128) {
+    var lvl: uint32 = crx_chacha_level();
+    if (lvl != 0) {
+      var st: uint32[16];
+      st[0] = (uint32)0x61707865;
+      st[1] = (uint32)0x3320646e;
+      st[2] = (uint32)0x79622d32;
+      st[3] = (uint32)0x6b206574;
+      var k: int32 = 0;
+      while (k < 8) {
+        st[4 + k] = crx_ld32(&key[k * 4]);
+        k = k + 1;
+      }
+      st[12] = ctr;
+      st[13] = crx_ld32(&nonce12[0]);
+      st[14] = crx_ld32(&nonce12[4]);
+      st[15] = crx_ld32(&nonce12[8]);
+      var nb: int64 = n >> 6;
+      if (lvl == 2) {
+        var n4: int64 = nb & ~(int64)3;
+        crx_chacha_avx2_blocks(&st[0], inp, out, n4);
+        pos = n4 << 6;
+        ctr = ctr + (uint32)n4;
+        nb = nb - n4;
+      }
+      var n2: int64 = nb & ~(int64)1;
+      st[12] = ctr;
+      crx_chacha_ssse3_blocks(&st[0], &inp[pos], &out[pos], n2);
+      pos = pos + (n2 << 6);
+      ctr = ctr + (uint32)n2;
+      cr_wipe((uint8*)&st[0], 64);
+    }
+  }
   while (pos < n) {
     crx_chacha20_block(key, ctr, nonce12, &ks[0]);
     var take: int64 = n - pos;
