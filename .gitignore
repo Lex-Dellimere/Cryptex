@@ -8,3 +8,6 @@ examples/basic/mettle.deps
 HANDOFF.md
 reports/
 tools/
+examples/bench/build/
+examples/bench/.mbuild/
+examples/bench/mettle.deps

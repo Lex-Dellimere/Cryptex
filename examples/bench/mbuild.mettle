@@ -1,0 +1,11 @@
+import "mbuild/api";
+
+// Times every primitive in Cryptex and prints a table.
+//   cd examples/bench && mbuild run -r
+fn project() {
+  mb_package("crypto_bench", "0.1.0");
+}
+
+fn deps() {
+  mb_dep_path("crypto", "../..");
+}

@@ -95,6 +95,7 @@ src/password/       Argon2id password hashing
 src/recipes/        signed values, tokens and codes, seal/open, TOTP
 tests/              test programs; test data in tests/vectors/
 examples/basic/     a small project that uses the library
+examples/bench/     speed of every primitive (`mbuild run -r`)
 docs/API.md         every public function
 ```
 
@@ -117,6 +118,31 @@ docs/API.md         every public function
 | `CR_PW_SENSITIVE` | t=4, 1 GiB | rare, high-value unlocks (several seconds) |
 
 Store the text from `cr_pwhash_text`. After a good login, `cr_pwhash_needs_rehash` tells you when to store a new hash.
+
+## Speed
+
+Release build on one x86-64 machine (2026-11-05), next to OpenSSL 3.5 on the
+same machine. Run `cd examples/bench && mbuild run -r` to measure yours.
+
+| Operation | Cryptex | OpenSSL 3.5 |
+|---|---|---|
+| AES-128-GCM, 16 KiB (AES-NI) | 3.6 GB/s | 11.0 GB/s |
+| AES-256-GCM, 16 KiB (AES-NI) | 3.2 GB/s | 9.8 GB/s |
+| AES-128-GCM, portable constant-time code | 93 MB/s | - |
+| ChaCha20-Poly1305, 16 KiB | 216 MB/s | 3.9 GB/s |
+| SHA-256, 16 KiB | 160 MB/s | 1.95 GB/s |
+| SHA-512, 16 KiB | 210 MB/s | 0.91 GB/s |
+| X25519 | 103 us | 35 us |
+| Ed25519 sign / verify | 51 / 134 us | 41 / 116 us |
+| P-256 ECDH | 500 us | 62 us |
+| P-256 ECDSA sign / verify | 447 / 923 us | 25 / 75 us |
+| P-384 ECDSA sign / verify | 1.6 / 3.0 ms | 0.29 / 0.70 ms |
+| RSA-2048 sign / verify | 3.5 ms / 192 us | 0.33 ms / 21 us |
+| Argon2id, INTERACTIVE preset | 239 ms | - |
+
+OpenSSL uses hand-written assembly with SIMD and the CPU's SHA and AES
+instructions. Cryptex uses AES-NI and PCLMULQDQ for AES-GCM; everything else
+is portable Mettle code, and the gaps above are the next speed work.
 
 ## Tests
 
