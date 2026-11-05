@@ -8,11 +8,16 @@
 // SHA-384 is SHA-512 with other initial values and the output cut to 48
 // bytes; it shares the SHA-512 compression.
 //
+// On x86-64 CPUs with SHA-NI, SHA-256 blocks go through
+// sha256_hw_x86_64.mettle instead; the output is the same.
+//
 // The SHA-512 round constants are stored as 32-bit halves (high, low) and
 // joined when used, because Mettle integer literals are 32-bit.
 
 import "crypto/core/status";
 import "crypto/core/util";
+import "crypto/hash/sha256_hw_x86_64" if x86_64;
+import "crypto/hash/sha256_hw_aarch64" if aarch64;
 
 var g_crx_k256: uint32[64] = [
   (uint32)0x428a2f98, (uint32)0x71374491, (uint32)0xb5c0fbcf, (uint32)0xe9b5dba5,
@@ -148,7 +153,9 @@ fn crx_store64be(p: uint8*, v: uint64) {
 }
 
 // One 64-byte block.
-fn crx_sha256_block(s: CrxSha256*, blk: uint8*) {
+/// internal: the portable SHA-256 compression of one 64-byte block (also
+/// used by the tests to check the SHA-NI path).
+export fn crx_sha256_block_sw(s: CrxSha256*, blk: uint8*) {
   var w: uint32[64];
   for i in 0..16 {
     w[i] = crx_load32be(&blk[i * 4]);
@@ -244,6 +251,25 @@ fn crx_sha512_block(s: CrxSha512*, blk: uint8*) {
   cr_wipe((uint8*)&w[0], 640);
 }
 
+var g_crx_sha256_hw: uint32 = 0;
+
+fn crx_sha256_blocks(s: CrxSha256*, p: uint8*, nblocks: int64) {
+  var l: uint32 = g_crx_sha256_hw;
+  if (l == 0) {
+    l = crx_sha256_hw_available() + (uint32)1;
+    g_crx_sha256_hw = l;
+  }
+  if (l == 2) {
+    crx_sha256_hw_blocks(&s->h[0], p, nblocks, &g_crx_k256[0]);
+    return;
+  }
+  var i: int64 = 0;
+  while (i < nblocks) {
+    crx_sha256_block_sw(s, &p[i * 64]);
+    i = i + 1;
+  }
+}
+
 /// internal: starts a SHA-256 computation.
 export fn crx_sha256_init(s: CrxSha256*) {
   for i in 0..8 {
@@ -267,12 +293,13 @@ export fn crx_sha256_update(s: CrxSha256*, p: uint8*, n: int64) {
       pos = pos + 1;
     }
     if (s->buflen < 64) { return; }
-    crx_sha256_block(s, &s->buf[0]);
+    crx_sha256_blocks(s, &s->buf[0], 1);
     s->buflen = 0;
   }
-  while (n - pos >= 64) {
-    crx_sha256_block(s, &p[pos]);
-    pos = pos + 64;
+  var nb: int64 = (n - pos) >> 6;
+  if (nb > 0) {
+    crx_sha256_blocks(s, &p[pos], nb);
+    pos = pos + (nb << 6);
   }
   while (pos < n) {
     s->buf[s->buflen] = p[pos];
@@ -289,12 +316,12 @@ export fn crx_sha256_final(s: CrxSha256*, out: uint8*) {
   i = i + 1;
   if (i > 56) {
     while (i < 64) { s->buf[i] = 0; i = i + 1; }
-    crx_sha256_block(s, &s->buf[0]);
+    crx_sha256_blocks(s, &s->buf[0], 1);
     i = 0;
   }
   while (i < 56) { s->buf[i] = 0; i = i + 1; }
   crx_store64be(&s->buf[56], bits);
-  crx_sha256_block(s, &s->buf[0]);
+  crx_sha256_blocks(s, &s->buf[0], 1);
   for j in 0..8 {
     crx_store32be(&out[j * 4], s->h[j]);
   }

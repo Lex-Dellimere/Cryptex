@@ -130,7 +130,7 @@ same machine. Run `cd examples/bench && mbuild run -r` to measure yours.
 | AES-256-GCM, 16 KiB (AES-NI) | 3.2 GB/s | 9.8 GB/s |
 | AES-128-GCM, portable constant-time code | 93 MB/s | - |
 | ChaCha20-Poly1305, 16 KiB | 730 MB/s | 3.9 GB/s |
-| SHA-256, 16 KiB | 160 MB/s | 1.95 GB/s |
+| SHA-256, 16 KiB (SHA-NI) | 1.6 GB/s | 1.95 GB/s |
 | SHA-512, 16 KiB | 210 MB/s | 0.91 GB/s |
 | X25519 | 103 us | 35 us |
 | Ed25519 sign / verify | 51 / 134 us | 41 / 116 us |
@@ -141,8 +141,8 @@ same machine. Run `cd examples/bench && mbuild run -r` to measure yours.
 | Argon2id, INTERACTIVE preset | 239 ms | - |
 
 OpenSSL uses hand-written assembly with SIMD and the CPU's SHA and AES
-instructions. Cryptex uses AES-NI and PCLMULQDQ for AES-GCM and SSSE3 or
-AVX2 for ChaCha20, picked at run time; everything else is portable Mettle
+instructions. Cryptex uses AES-NI and PCLMULQDQ for AES-GCM, SSSE3 or AVX2
+for ChaCha20 and SHA-NI for SHA-256, picked at run time; everything else is portable Mettle
 code, and the gaps above are the next speed work.
 
 ## Tests
