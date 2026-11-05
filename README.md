@@ -67,6 +67,7 @@ fn main() -> int32 {
 |---|---|---|
 | Random, compare, wipe | `cr_random_bytes`, `cr_equal`, `cr_is_zero`, `cr_wipe` | Linux `getrandom` |
 | Hashes | `cr_sha256`, `cr_sha384`, `cr_sha512`, `cr_blake2b`, and `_init`/`_update`/`_final` to stream | FIPS 180-4, RFC 7693 |
+| Legacy hashes, not for security | `cr_md5`, `cr_sha1` (and streaming forms), only where a standard needs them, such as RFC 9562 UUIDs | RFC 1321, FIPS 180-4 |
 | MAC | `cr_hmac_sha256*`, `cr_hmac_sha384*`, `cr_hmac_sha512*` | RFC 2104 |
 | Key derivation | `cr_hkdf_sha256*`, `cr_hkdf_sha384*` | RFC 5869 |
 | Passwords | `cr_pwhash_str`, `cr_pwhash_verify`, `cr_pwhash_needs_rehash` | Argon2id, RFC 9106 |
@@ -79,7 +80,6 @@ fn main() -> int32 {
 | RSA signatures | `cr_rsa_verify_pkcs1`, `cr_rsa_verify_pss`, `cr_rsa_sign_pss`, `cr_rsa_sign_pkcs1` | RFC 8017 |
 | Encoding | `cr_hex_*`, `cr_base64url_*` | RFC 4648 |
 
-SHA-1 is inside, but only for TOTP. It is not offered on its own.
 
 ## Layout
 

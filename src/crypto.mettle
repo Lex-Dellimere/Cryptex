@@ -13,7 +13,8 @@
 //   core/      status (CR_OK, CR_E_*), types (Cr* structs), util (cr_random_*,
 //              cr_equal, cr_is_zero, cr_wipe), encode (hex, base64url)
 //   hash/      cr_sha256, cr_sha512 (FIPS 180-4), cr_blake2b (RFC 7693),
-//              one-shot and streaming
+//              one-shot and streaming; legacy: cr_md5, cr_sha1 (not for
+//              security; RFC 9562 UUIDs)
 //   mac/       mac: cr_hmac_sha256*, cr_hmac_sha512* (RFC 2104)
 //              kdf: cr_hkdf_sha256* (RFC 5869)
 //   cipher/    aead: cr_aead_* (XChaCha20-Poly1305) and cr_chacha20poly1305_*
@@ -37,6 +38,7 @@ import "crypto/core/status";
 import "crypto/core/types";
 import "crypto/core/util";
 import "crypto/hash/hash";
+import "crypto/hash/legacy";
 import "crypto/mac/mac";
 import "crypto/mac/kdf";
 import "crypto/password/pwhash";

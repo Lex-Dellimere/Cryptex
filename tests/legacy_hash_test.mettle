@@ -1,0 +1,166 @@
+// MD5 (RFC 1321) and SHA-1 (FIPS 180-4) through the public legacy API
+// (cr_md5, cr_sha1 and their _init/_update/_final forms): the RFC 1321 A.5
+// test suite, the FIPS 180-4 "abc" example, every row of
+// tests/vectors/vec_md5.mettle (msg|md5) and tests/vectors/vec_sha1.mettle
+// (msg|sha1|key|hmac, fields 0 and 1). Every message is hashed in one shot and
+// fed in pieces of 1, 7, 64 and 1000 bytes; the state must be all zero after
+// _final; argument errors are checked at the end.
+import "crypto/crypto";
+import "tcheck";
+import "vectors/vec_md5";
+import "vectors/vec_sha1";
+
+fn piece(k: int32, n: int64) -> int64 {
+  if (k == 0) { return 1; }
+  if (k == 1) { return 7; }
+  if (k == 2) { return 64; }
+  if (k == 3) { return 1000; }
+  if (n < 1) { return 1; }
+  return n;
+}
+
+fn md5_row(label: string, msg: uint8*, n: int64, want: string) {
+  var o: CrMd5;
+  tc_fill(&o.b[0], 16, 0);
+  tc_rc(label + " one shot", cr_md5(&o, msg, n), CR_OK);
+  tc_hex_eq(label + " one shot", &o.b[0], 16, want);
+  for k in 0..5 {
+    var st: CrMd5State;
+    var d: CrMd5;
+    var step: int64 = piece(k, n);
+    tc_rc(label + " init", cr_md5_init(&st), CR_OK);
+    var i: int64 = 0;
+    while (i < n) {
+      var take: int64 = n - i;
+      if (take > step) { take = step; }
+      tc_rc(label + " update", cr_md5_update(&st, &msg[i], take), CR_OK);
+      i = i + take;
+    }
+    tc_rc(label + " update 0", cr_md5_update(&st, msg, 0), CR_OK);
+    tc_rc(label + " update null 0", cr_md5_update(&st, 0, 0), CR_OK);
+    tc_rc(label + " final", cr_md5_final(&st, &d), CR_OK);
+    tc_hex_eq(label + " piece {step}", &d.b[0], 16, want);
+    tc_ok(label + " state wiped", tc_all_zero((uint8*)&st, (int64)sizeof(CrMd5State)));
+  }
+}
+
+fn sha1_row(label: string, msg: uint8*, n: int64, want: string) {
+  var o: CrSha1;
+  tc_fill(&o.b[0], 20, 0);
+  tc_rc(label + " one shot", cr_sha1(&o, msg, n), CR_OK);
+  tc_hex_eq(label + " one shot", &o.b[0], 20, want);
+  for k in 0..5 {
+    var st: CrSha1State;
+    var d: CrSha1;
+    var step: int64 = piece(k, n);
+    tc_rc(label + " init", cr_sha1_init(&st), CR_OK);
+    var i: int64 = 0;
+    while (i < n) {
+      var take: int64 = n - i;
+      if (take > step) { take = step; }
+      tc_rc(label + " update", cr_sha1_update(&st, &msg[i], take), CR_OK);
+      i = i + take;
+    }
+    tc_rc(label + " update 0", cr_sha1_update(&st, msg, 0), CR_OK);
+    tc_rc(label + " update null 0", cr_sha1_update(&st, 0, 0), CR_OK);
+    tc_rc(label + " final", cr_sha1_final(&st, &d), CR_OK);
+    tc_hex_eq(label + " piece {step}", &d.b[0], 20, want);
+    tc_ok(label + " state wiped", tc_all_zero((uint8*)&st, (int64)sizeof(CrSha1State)));
+  }
+}
+
+fn rfc1321() {
+  md5_row("rfc1321 empty", "".chars, 0, "d41d8cd98f00b204e9800998ecf8427e");
+  md5_row("rfc1321 a", "a".chars, 1, "0cc175b9c0f1b6a831c399e269772661");
+  md5_row("rfc1321 abc", "abc".chars, 3, "900150983cd24fb0d6963f7d28e17f72");
+  md5_row("rfc1321 message digest", "message digest".chars, 14, "f96b697d7cb7938d525a2f31aaf161d0");
+  md5_row("rfc1321 lower", "abcdefghijklmnopqrstuvwxyz".chars, 26, "c3fcd3d76192e4007dfb496cca67e13b");
+  var alnum: string = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  md5_row("rfc1321 alnum", alnum.chars, (int64)alnum.length, "d174ab98d277d9f5a5611c2c9f419d9f");
+  var digits: string = "1234567890";
+  var eight: uint8[80];
+  for r in 0..8 {
+    for j in 0..10 {
+      eight[r * 10 + j] = digits.chars[j];
+    }
+  }
+  md5_row("rfc1321 8x digits", &eight[0], 80, "57edf4a22be3c955ac49da2e2107b67a");
+}
+
+fn fips_abc() {
+  sha1_row("fips abc", "abc".chars, 3, "a9993e364706816aba3e25717850c26c9cd0d89d");
+}
+
+fn md5_vectors() {
+  var msg: uint8[3072];
+  for r in 0..VEC_MD5_N {
+    var row: string = VEC_MD5[r];
+    var n: int64 = tc_unhex(tc_field(row, 0), &msg[0], 3072);
+    tc_ok("md5 row {r} decoded", n >= 0);
+    md5_row("md5 row {r}", &msg[0], n, tc_field(row, 1));
+  }
+}
+
+fn sha1_vectors() {
+  var msg: uint8[4096];
+  for r in 0..VEC_SHA1_N {
+    var row: string = VEC_SHA1[r];
+    var n: int64 = tc_unhex(tc_field(row, 0), &msg[0], 4096);
+    tc_ok("sha1 row {r} decoded", n >= 0);
+    sha1_row("sha1 row {r}", &msg[0], n, tc_field(row, 1));
+  }
+}
+
+fn errors() {
+  var m: uint8[8];
+  tc_fill(&m[0], 8, 7);
+
+  var s5: CrMd5State;
+  var d5: CrMd5;
+  tc_fill(&d5.b[0], 16, 0);
+  tc_rc("md5 null out", cr_md5(0, &m[0], 8), CR_E_ARG);
+  tc_rc("md5 null msg", cr_md5(&d5, 0, 1), CR_E_ARG);
+  tc_rc("md5 negative n", cr_md5(&d5, &m[0], -1), CR_E_ARG);
+  tc_ok("md5 error leaves out", tc_all_zero(&d5.b[0], 16));
+  tc_rc("md5 null msg n 0", cr_md5(&d5, 0, 0), CR_OK);
+  tc_hex_eq("md5 null msg n 0 is empty hash", &d5.b[0], 16, "d41d8cd98f00b204e9800998ecf8427e");
+  tc_rc("md5 init null", cr_md5_init(0), CR_E_ARG);
+  tc_rc("md5 init", cr_md5_init(&s5), CR_OK);
+  tc_rc("md5 update null st", cr_md5_update(0, &m[0], 1), CR_E_ARG);
+  tc_rc("md5 update null msg", cr_md5_update(&s5, 0, 1), CR_E_ARG);
+  tc_rc("md5 update neg", cr_md5_update(&s5, &m[0], -1), CR_E_ARG);
+  tc_rc("md5 final null st", cr_md5_final(0, &d5), CR_E_ARG);
+  tc_fill(&d5.b[0], 16, 0);
+  tc_rc("md5 final null out", cr_md5_final(&s5, 0), CR_E_ARG);
+  tc_ok("md5 null out: state wiped", tc_all_zero((uint8*)&s5, (int64)sizeof(CrMd5State)));
+  tc_ok("md5 null out: out untouched", tc_all_zero(&d5.b[0], 16));
+
+  var s1: CrSha1State;
+  var d1: CrSha1;
+  tc_fill(&d1.b[0], 20, 0);
+  tc_rc("sha1 null out", cr_sha1(0, &m[0], 8), CR_E_ARG);
+  tc_rc("sha1 null msg", cr_sha1(&d1, 0, 1), CR_E_ARG);
+  tc_rc("sha1 negative n", cr_sha1(&d1, &m[0], -1), CR_E_ARG);
+  tc_ok("sha1 error leaves out", tc_all_zero(&d1.b[0], 20));
+  tc_rc("sha1 null msg n 0", cr_sha1(&d1, 0, 0), CR_OK);
+  tc_hex_eq("sha1 null msg n 0 is empty hash", &d1.b[0], 20, "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+  tc_rc("sha1 init null", cr_sha1_init(0), CR_E_ARG);
+  tc_rc("sha1 init", cr_sha1_init(&s1), CR_OK);
+  tc_rc("sha1 update null st", cr_sha1_update(0, &m[0], 1), CR_E_ARG);
+  tc_rc("sha1 update null msg", cr_sha1_update(&s1, 0, 1), CR_E_ARG);
+  tc_rc("sha1 update neg", cr_sha1_update(&s1, &m[0], -1), CR_E_ARG);
+  tc_rc("sha1 final null st", cr_sha1_final(0, &d1), CR_E_ARG);
+  tc_fill(&d1.b[0], 20, 0);
+  tc_rc("sha1 final null out", cr_sha1_final(&s1, 0), CR_E_ARG);
+  tc_ok("sha1 null out: state wiped", tc_all_zero((uint8*)&s1, (int64)sizeof(CrSha1State)));
+  tc_ok("sha1 null out: out untouched", tc_all_zero(&d1.b[0], 20));
+}
+
+fn main() -> int32 {
+  rfc1321();
+  fips_abc();
+  md5_vectors();
+  sha1_vectors();
+  errors();
+  return tc_finish("legacy_hash");
+}

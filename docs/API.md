@@ -4,7 +4,7 @@ Generated from the `///` contracts in `src/`. Do not edit by hand.
 
 Pure Mettle: no C, no shared state. Every function is safe on any thread.
 
-Primitives: [core/status](#corestatus), [core/types](#coretypes), [core/util](#coreutil), [core/encode](#coreencode), [hash/hash](#hashhash), [mac/mac](#macmac), [mac/kdf](#mackdf), [password/pwhash](#passwordpwhash), [cipher/aead](#cipheraead), [cipher/gcm](#ciphergcm), [ecc/kx](#ecckx), [ecc/sign](#eccsign), [ecc/p256](#eccp256), [ecc/p384](#eccp384), [ecc/ecdsa](#eccecdsa), [rsa/rsa](#rsarsa).
+Primitives: [core/status](#corestatus), [core/types](#coretypes), [core/util](#coreutil), [core/encode](#coreencode), [hash/hash](#hashhash), [hash/legacy](#hashlegacy), [mac/mac](#macmac), [mac/kdf](#mackdf), [password/pwhash](#passwordpwhash), [cipher/aead](#cipheraead), [cipher/gcm](#ciphergcm), [ecc/kx](#ecckx), [ecc/sign](#eccsign), [ecc/p256](#eccp256), [ecc/p384](#eccp384), [ecc/ecdsa](#eccecdsa), [rsa/rsa](#rsarsa).
 Recipes: [recipes/signed](#recipessigned), [recipes/token](#recipestoken), [recipes/seal](#recipesseal), [recipes/totp](#recipestotp).
 
 ## core/status
@@ -1131,6 +1131,214 @@ names SHA-512 for functions that take a hash choice (ECDSA, RSA).
 
 ```mettle
 cr_rsa_verify_pkcs1(&sig[0], sl, m, n, CR_HASH_SHA512, mod, ml, e, el)
+```
+
+## hash/legacy
+
+Legacy hashes: MD5 (RFC 1321) and SHA-1 (FIPS 180-4), pure Mettle.
+
+### CrMd5
+
+```mettle
+export struct CrMd5 {
+  b: uint8[16];
+}
+```
+
+An MD5 digest (16 bytes). Legacy: not for security. Use only where a standard requires it, such as RFC 9562 name-based UUIDs. For anything security-related use SHA-256 or BLAKE2b.
+
+- **owns:** the caller owns it
+- **thread:** any thread (no shared state)
+
+```mettle
+var d: CrMd5; cr_md5(&d, s.chars, (int64)s.length);
+```
+
+### CrMd5State
+
+```mettle
+export struct CrMd5State {
+  s: CrxMd5;
+}
+```
+
+Streaming MD5 state. Treat as opaque: only cr_md5_init, _update and _final touch it. The caller provides the memory. Legacy: not for security. Use only where a standard requires it, such as RFC 9562 name-based UUIDs. For anything security-related use SHA-256 or BLAKE2b.
+
+- **owns:** the caller owns the state; _final wipes it; to abandon a hash early wipe it with cr_wipe((uint8*)st, (int64)sizeof(CrMd5State))
+- **thread:** any thread (no shared state); one thread per state
+
+```mettle
+var st: CrMd5State; cr_md5_init(&st);
+```
+
+### cr_md5
+
+```mettle
+export fn cr_md5(out: CrMd5*, msg: uint8*, n: int64) -> int32
+```
+
+Computes MD5 of n bytes (RFC 1321). Legacy: not for security. Use only where a standard requires it, such as RFC 9562 name-based UUIDs. For anything security-related use SHA-256 or BLAKE2b.
+
+- **in:** out; msg readable for n bytes (may be 0 when n == 0); n >= 0
+- **returns:** CR_OK; CR_E_ARG (null out, null msg with n > 0, n < 0). On error out is not written
+- **owns:** nothing; the caller owns out and msg
+- **thread:** any thread (no shared state)
+
+```mettle
+var d: CrMd5; cr_md5(&d, s.chars, (int64)s.length);
+```
+
+### cr_md5_init
+
+```mettle
+export fn cr_md5_init(st: CrMd5State*) -> int32
+```
+
+Starts a streaming MD5 hash (RFC 1321). Feed data with cr_md5_update, finish with cr_md5_final. Legacy: not for security. Use only where a standard requires it, such as RFC 9562 name-based UUIDs. For anything security-related use SHA-256 or BLAKE2b.
+
+- **in:** st writable state
+- **returns:** CR_OK; CR_E_ARG (null st)
+- **owns:** the caller owns st; _final wipes it, or abandon it with cr_wipe((uint8*)st, (int64)sizeof(CrMd5State))
+- **thread:** any thread (no shared state)
+
+```mettle
+var st: CrMd5State; cr_md5_init(&st);
+```
+
+### cr_md5_update
+
+```mettle
+export fn cr_md5_update(st: CrMd5State*, msg: uint8*, n: int64) -> int32
+```
+
+Feeds n bytes into a streaming MD5 hash. Any split of the input gives the same digest as cr_md5 over the whole. Legacy: not for security. Use only where a standard requires it, such as RFC 9562 name-based UUIDs. For anything security-related use SHA-256 or BLAKE2b.
+
+- **in:** st initialised by cr_md5_init; msg readable for n bytes (may be 0 when n == 0); n >= 0
+- **returns:** CR_OK; CR_E_ARG (null st, null msg with n > 0, n < 0). On error the state is unchanged
+- **owns:** the caller owns st and msg
+- **thread:** any thread (no shared state)
+
+```mettle
+cr_md5_update(&st, buf, (int64)got);
+```
+
+### cr_md5_final
+
+```mettle
+export fn cr_md5_final(st: CrMd5State*, out: CrMd5*) -> int32
+```
+
+Finishes a streaming MD5 hash and writes the digest. Always wipes st, also on error. Legacy: not for security. Use only where a standard requires it, such as RFC 9562 name-based UUIDs. For anything security-related use SHA-256 or BLAKE2b.
+
+- **in:** st initialised by cr_md5_init; out writable
+- **returns:** CR_OK; CR_E_ARG (null st or out). With a null out and a non-null st the state is wiped and nothing is written
+- **owns:** the caller owns st and out; st is wiped
+- **thread:** any thread (no shared state)
+
+```mettle
+var d: CrMd5; cr_md5_final(&st, &d);
+```
+
+### CrSha1
+
+```mettle
+export struct CrSha1 {
+  b: uint8[20];
+}
+```
+
+An SHA-1 digest (20 bytes). Legacy: not for security. Use only where a standard requires it, such as RFC 9562 name-based UUIDs. For anything security-related use SHA-256 or BLAKE2b.
+
+- **owns:** the caller owns it
+- **thread:** any thread (no shared state)
+
+```mettle
+var d: CrSha1; cr_sha1(&d, s.chars, (int64)s.length);
+```
+
+### CrSha1State
+
+```mettle
+export struct CrSha1State {
+  s: CrxSha1;
+}
+```
+
+Streaming SHA-1 state. Treat as opaque: only cr_sha1_init, _update and _final touch it. The caller provides the memory. Legacy: not for security. Use only where a standard requires it, such as RFC 9562 name-based UUIDs. For anything security-related use SHA-256 or BLAKE2b.
+
+- **owns:** the caller owns the state; _final wipes it; to abandon a hash early wipe it with cr_wipe((uint8*)st, (int64)sizeof(CrSha1State))
+- **thread:** any thread (no shared state); one thread per state
+
+```mettle
+var st: CrSha1State; cr_sha1_init(&st);
+```
+
+### cr_sha1
+
+```mettle
+export fn cr_sha1(out: CrSha1*, msg: uint8*, n: int64) -> int32
+```
+
+Computes SHA-1 of n bytes (FIPS 180-4). Legacy: not for security. Use only where a standard requires it, such as RFC 9562 name-based UUIDs. For anything security-related use SHA-256 or BLAKE2b.
+
+- **in:** out; msg readable for n bytes (may be 0 when n == 0); n >= 0
+- **returns:** CR_OK; CR_E_ARG (null out, null msg with n > 0, n < 0). On error out is not written
+- **owns:** nothing; the caller owns out and msg
+- **thread:** any thread (no shared state)
+
+```mettle
+var d: CrSha1; cr_sha1(&d, s.chars, (int64)s.length);
+```
+
+### cr_sha1_init
+
+```mettle
+export fn cr_sha1_init(st: CrSha1State*) -> int32
+```
+
+Starts a streaming SHA-1 hash (FIPS 180-4). Feed data with cr_sha1_update, finish with cr_sha1_final. Legacy: not for security. Use only where a standard requires it, such as RFC 9562 name-based UUIDs. For anything security-related use SHA-256 or BLAKE2b.
+
+- **in:** st writable state
+- **returns:** CR_OK; CR_E_ARG (null st)
+- **owns:** the caller owns st; _final wipes it, or abandon it with cr_wipe((uint8*)st, (int64)sizeof(CrSha1State))
+- **thread:** any thread (no shared state)
+
+```mettle
+var st: CrSha1State; cr_sha1_init(&st);
+```
+
+### cr_sha1_update
+
+```mettle
+export fn cr_sha1_update(st: CrSha1State*, msg: uint8*, n: int64) -> int32
+```
+
+Feeds n bytes into a streaming SHA-1 hash. Any split of the input gives the same digest as cr_sha1 over the whole. Legacy: not for security. Use only where a standard requires it, such as RFC 9562 name-based UUIDs. For anything security-related use SHA-256 or BLAKE2b.
+
+- **in:** st initialised by cr_sha1_init; msg readable for n bytes (may be 0 when n == 0); n >= 0
+- **returns:** CR_OK; CR_E_ARG (null st, null msg with n > 0, n < 0). On error the state is unchanged
+- **owns:** the caller owns st and msg
+- **thread:** any thread (no shared state)
+
+```mettle
+cr_sha1_update(&st, buf, (int64)got);
+```
+
+### cr_sha1_final
+
+```mettle
+export fn cr_sha1_final(st: CrSha1State*, out: CrSha1*) -> int32
+```
+
+Finishes a streaming SHA-1 hash and writes the digest. Always wipes st, also on error. Legacy: not for security. Use only where a standard requires it, such as RFC 9562 name-based UUIDs. For anything security-related use SHA-256 or BLAKE2b.
+
+- **in:** st initialised by cr_sha1_init; out writable
+- **returns:** CR_OK; CR_E_ARG (null st or out). With a null out and a non-null st the state is wiped and nothing is written
+- **owns:** the caller owns st and out; st is wiped
+- **thread:** any thread (no shared state)
+
+```mettle
+var d: CrSha1; cr_sha1_final(&st, &d);
 ```
 
 ## mac/mac
