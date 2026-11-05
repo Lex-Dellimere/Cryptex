@@ -140,4 +140,4 @@ Each `tests/<name>_test.mettle` is a test program. Two kinds of checks:
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE). Some code is ported from BearSSL (MIT); see [NOTICE](NOTICE).
+Apache License 2.0. See [LICENSE](LICENSE). Some code is ported from BearSSL (MIT) and Monocypher (BSD-2-Clause); see [NOTICE](NOTICE).

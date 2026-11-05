@@ -36,12 +36,12 @@ techniques from proven implementations. Nothing here is a new algorithm.
 | ECDSA, RFC 6979 nonces | BearSSL `ecdsa_i31_*`, `hmac_drbg` | MIT | Deterministic nonces remove the need for a good random source when signing. Strict DER is checked by re-encoding, as BoringSSL does. |
 | RSA verify | BearSSL `rsa_i31_pub`, `rsa_pkcs1_sig_unpad`, `rsa_pss_sig_unpad`, `mgf1` | MIT | PKCS#1 v1.5 is checked by encoding the expected block and comparing it whole (RFC 8017 8.2.2), which avoids parser bugs. |
 | RSA sign | BearSSL `rsa_i31_priv`, `rsa_pss_sig_pad`, `rsa_pkcs1_sig_pad` | MIT | Constant-time CRT. Every signature is checked with the public key before release, which stops CRT fault attacks (Boneh-DeMillo-Lipton). |
-| Curve25519, Ed25519 (`src/ecc/curve25519.mettle`) | TweetNaCl | public domain | Short, audited design with 16 limbs of 64 bits, masked swaps, no 128-bit math needed. Monocypher and ref10 were studied for a faster layout later. |
+| Curve25519, Ed25519 (`src/ecc/curve25519.mettle`) | Monocypher 4.0.3 (curve and scalar code, from ref10) | BSD-2-Clause / CC0 | 10 limbs of 25.5 bits with 64-bit products, a constant-time comb table for fixed-base multiplication, sliding windows for verification. About 8 times faster than the first TweetNaCl version for X25519 and 10 to 28 times for Ed25519. Hashing stays SHA-512 per RFC 8032 (Monocypher's default EdDSA uses BLAKE2b). |
 | Poly1305 | poly1305-donna (32-bit) | public domain / MIT | Five 26-bit limbs with 64-bit products; the standard constant-time layout. |
 | ChaCha20, HChaCha20, BLAKE2b, SHA-2, SHA-1, Argon2id | the RFC and FIPS reference descriptions | — | Straightforward ARX and table-free designs; written from the specifications. |
 | Constant-time compare and wipe | libsodium `sodium_memcmp`, `sodium_memzero` (ideas only) | ISC | OR-accumulate over every byte; volatile stores the optimizer cannot remove. |
 
-Ported files say so in their header. BearSSL's license is in `NOTICE`.
+Ported files say so in their header. The BearSSL and Monocypher licenses are in `NOTICE`.
 
 ## How it is checked
 
